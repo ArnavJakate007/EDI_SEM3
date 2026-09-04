@@ -5791,7 +5791,7 @@ def test_farneback_warp_beats_a_linear_blend_on_pure_translation():
 
 
 def test_farneback_warp_returns_the_right_shape_and_dtype():
-    i0, i2 = _texture(0), _texture(seed=1)
+    i0, i2 = _texture(seed=0), _texture(seed=1)
     out = farneback_warp(i0, i2, 0.5, data_range=DR)
     assert out.shape == i0.shape
     assert out.dtype == np.float32
@@ -5802,7 +5802,7 @@ def test_registry_exposes_both_required_baselines():
 
 
 def test_run_baseline_dispatches_and_rejects_unknown_names():
-    i0, i2 = _texture(0), _texture(seed=1)
+    i0, i2 = _texture(seed=0), _texture(seed=1)
     np.testing.assert_allclose(
         run_baseline("linear", i0, i2, 0.5, data_range=DR), linear_blend(i0, i2, 0.5)
     )
