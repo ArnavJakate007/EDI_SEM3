@@ -760,10 +760,14 @@ def bilinear_sample(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.n
     r_s = np.where(finite, r, -1.0)
     c_s = np.where(finite, c, -1.0)
 
+    # Validity is about the sample position, not the upper neighbour: a position
+    # exactly on the last row or column is in bounds, and its (clamped) upper
+    # neighbour contributes zero weight.
+    valid = finite & (r_s >= 0.0) & (r_s <= h - 1) & (c_s >= 0.0) & (c_s <= w - 1)
+
     r0 = np.floor(r_s).astype(np.int64)
     c0 = np.floor(c_s).astype(np.int64)
     r1, c1 = r0 + 1, c0 + 1
-    valid = finite & (r0 >= 0) & (c0 >= 0) & (r1 < h) & (c1 < w)
 
     r0c, r1c = np.clip(r0, 0, h - 1), np.clip(r1, 0, h - 1)
     c0c, c1c = np.clip(c0, 0, w - 1), np.clip(c1, 0, w - 1)
