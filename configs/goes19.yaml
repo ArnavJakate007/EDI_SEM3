@@ -1,0 +1,23 @@
+data:
+  sensor: goes19
+  raw_root: data/raw/goes19
+  cache_root: cache/goes19
+  cadence_minutes: 10
+  tolerance_minutes: 2
+  grid:
+    lat_min: 10.0
+    lat_max: 45.0
+    lon_min: -105.0
+    lon_max: -60.0
+    resolution_deg: 0.04
+  normalization:
+    bt_min: 180.0
+    bt_max: 330.0
+train:
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 8
+  lr: 2.0e-4
+  epochs: 40
+  amp: true
+  checkpoint_dir: checkpoints/goes19

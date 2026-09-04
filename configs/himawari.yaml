@@ -1,0 +1,23 @@
+data:
+  sensor: himawari8
+  raw_root: data/raw/himawari
+  cache_root: cache/himawari
+  cadence_minutes: 10
+  tolerance_minutes: 2
+  grid:
+    lat_min: -10.0
+    lat_max: 40.0
+    lon_min: 60.0
+    lon_max: 110.0
+    resolution_deg: 0.05
+  normalization:
+    bt_min: 180.0
+    bt_max: 330.0
+train:
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 8
+  lr: 2.0e-4
+  epochs: 40
+  amp: true
+  checkpoint_dir: checkpoints/himawari

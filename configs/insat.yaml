@@ -1,0 +1,25 @@
+data:
+  sensor: insat3dr
+  raw_root: data/raw/insat
+  cache_root: cache/insat
+  cadence_minutes: 30
+  tolerance_minutes: 5
+  grid:
+    lat_min: -10.0
+    lat_max: 40.0
+    lon_min: 60.0
+    lon_max: 110.0
+    resolution_deg: 0.05
+  normalization:
+    bt_min: 180.0
+    bt_max: 330.0
+train:
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 4
+  lr: 5.0e-5
+  epochs: 10
+  amp: true
+  checkpoint_dir: checkpoints/insat
+  freeze_prefixes: ["flow_net.encoder"]
+  lr_head_multiplier: 10.0
