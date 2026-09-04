@@ -1120,6 +1120,10 @@ git commit -m "feat: radiometric conversion, normalisation and cross-sensor stat
 
 - [ ] **Step 1: Write the shared test fixtures**
 
+First create `tests/__init__.py` (empty). It is required for two reasons: later tests do
+`from tests.conftest import ...`, and without it pytest resolves `tests/io/test_goes.py` to the
+module path `io.test_goes`, which collides with the standard library and fails collection.
+
 `tests/conftest.py`:
 
 ```python
