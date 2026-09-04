@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cross-Sensor Temporal Super Resolution</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"
+          defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Temporal Super Resolution</h1>
+      <p class="subtitle">Geostationary thermal imagery &mdash; original vs AI-interpolated</p>
+    </div>
+    <label class="run-picker">
+      <span>Run</span>
+      <select id="run-select" aria-label="Select an inference run"></select>
+    </label>
+  </header>
+
+  <section id="summary" class="summary" aria-live="polite"></section>
+
+  <section class="players">
+    <figure class="panel">
+      <figcaption>
+        <span class="panel-title">Original</span>
+        <span class="panel-note" id="label-original">observed frames</span>
+      </figcaption>
+      <div class="frame-wrap">
+        <img id="player-original" alt="Original satellite frame" />
+      </div>
+    </figure>
+
+    <figure class="panel">
+      <figcaption>
+        <span class="panel-title">Interpolated</span>
+        <span class="panel-note" id="label-interpolated">observed + synthesized</span>
+        <span class="badge" id="synthetic-badge" hidden>SYNTHETIC</span>
+      </figcaption>
+      <div class="frame-wrap">
+        <img id="player-interpolated" alt="Interpolated satellite frame" />
+      </div>
+    </figure>
+  </section>
+
+  <section class="controls">
+    <button id="play-toggle" type="button">Play</button>
+    <input id="timeline" type="range" min="0" max="0" value="0" step="1"
+           aria-label="Frame timeline" />
+    <span id="frame-label" class="frame-label">&mdash;</span>
+    <label class="speed">
+      Speed
+      <select id="speed">
+        <option value="500">0.5x</option>
+        <option value="250" selected>1x</option>
+        <option value="120">2x</option>
+        <option value="60">4x</option>
+      </select>
+    </label>
+    <a id="download-nc" class="button-link" href="#" download>Download .nc</a>
+  </section>
+
+  <section class="charts">
+    <figure class="card">
+      <figcaption>Model vs baselines &mdash; overall</figcaption>
+      <canvas id="chart-overall" height="220"></canvas>
+    </figure>
+    <figure class="card">
+      <figcaption>PSNR by event category</figcaption>
+      <canvas id="chart-category" height="220"></canvas>
+    </figure>
+  </section>
+
+  <section class="card">
+    <h2>Comparison against ground truth</h2>
+    <div class="table-scroll">
+      <table id="metrics-table"><tbody></tbody></table>
+    </div>
+    <p class="disclaimer">
+      Frames marked <strong>SYNTHETIC</strong> are AI-generated and are not observations.
+      They are decision-support augmentation only.
+    </p>
+  </section>
+</body>
+</html>
