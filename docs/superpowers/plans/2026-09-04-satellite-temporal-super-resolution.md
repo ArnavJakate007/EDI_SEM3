@@ -1032,9 +1032,10 @@ def planck_radiance_to_bt(
 
 def apply_lut(counts: np.ndarray, lut: np.ndarray) -> np.ndarray:
     """Map integer sensor counts through a count -> temperature table (INSAT L1B/L1C)."""
-    c = np.asarray(counts)
+    # Cast first: NumPy 2 refuses to put the -1 sentinel into an unsigned array.
+    c = np.asarray(counts, dtype=np.float64)
     table = np.asarray(lut, dtype=np.float32).ravel()
-    idx = np.rint(np.where(np.isfinite(c), c, -1)).astype(np.int64)
+    idx = np.rint(np.where(np.isfinite(c), c, -1.0)).astype(np.int64)
     inside = (idx >= 0) & (idx < table.size)
     out = np.full(idx.shape, np.nan, dtype=np.float32)
     out[inside] = table[idx[inside]]
