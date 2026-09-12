@@ -1,0 +1,20 @@
+data:
+  sensor: insat3dr
+  raw_root: data/raw/insat_rapidscan
+  cache_root: cache/insat_rapidscan
+  cadence_minutes: 4
+  tolerance_minutes: 1
+  grid:
+    lat_min: -10.0
+    lat_max: 40.0
+    lon_min: 60.0
+    lon_max: 110.0
+    resolution_deg: 0.05
+  normalization:
+    bt_min: 180.0
+    bt_max: 330.0
+train:
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 4
+  checkpoint_dir: checkpoints/insat
