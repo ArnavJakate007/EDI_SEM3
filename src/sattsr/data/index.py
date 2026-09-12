@@ -63,9 +63,16 @@ def load_index(path: str | Path) -> list[FrameRef]:
 
 
 def cache_path_for(cache_root: str | Path, ref: FrameRef) -> Path:
-    """`<cache_root>/<sensor>/<YYYYMMDD>/<HHMMSS>.npy`."""
+    """`<cache_root>/<sensor>/<YYYYMMDD>/<HHMMSS>.npy`.
+
+    A `cache_root` that already ends in the sensor name -- as `configs/goes19.yaml`
+    does with `cache/goes19` -- keeps that segment rather than gaining a second one.
+    """
     ts = ref.timestamp.astimezone(timezone.utc)
-    return Path(cache_root) / ref.sensor / ts.strftime("%Y%m%d") / f"{ts.strftime('%H%M%S')}.npy"
+    root = Path(cache_root)
+    if root.name != ref.sensor:
+        root = root / ref.sensor
+    return root / ts.strftime("%Y%m%d") / f"{ts.strftime('%H%M%S')}.npy"
 
 
 def prepare_cache(
