@@ -7,6 +7,7 @@ from sattsr.geo.grid import TargetGrid
 from sattsr.geo.resample import (
     GeosProjection,
     bilinear_sample,
+    coverage_fraction,
     regrid_geos,
     regrid_latlon,
     regrid_scattered,
@@ -93,3 +94,49 @@ def test_regrid_geos_returns_nan_off_disk():
         lat_min=-5.0, lat_max=5.0, lon_min=-100.0, lon_max=-90.0, resolution_deg=1.0
     )   # opposite side of the Earth
     assert np.all(np.isnan(regrid_geos(src, proj, grid)))
+
+
+# --------------------------------------------------------------- coverage_fraction
+
+
+def test_coverage_fraction_counts_valid_pixels():
+    frame = np.array([[1.0, np.nan], [2.0, 3.0]], dtype=np.float32)
+    assert coverage_fraction(frame) == pytest.approx(0.75)
+
+
+def test_coverage_fraction_is_one_for_a_fully_valid_frame():
+    assert coverage_fraction(np.zeros((8, 8), dtype=np.float32)) == pytest.approx(1.0)
+
+
+def test_coverage_fraction_is_zero_for_an_all_nan_frame():
+    assert coverage_fraction(np.full((8, 8), np.nan, dtype=np.float32)) == 0.0
+
+
+def test_coverage_fraction_handles_an_empty_array():
+    assert coverage_fraction(np.array([], dtype=np.float32)) == 0.0
+
+
+def test_coverage_fraction_tracks_a_growing_nan_region():
+    """Monotonic in the amount of missing data, which is what the gate relies on."""
+    frame = np.zeros((10, 10), dtype=np.float32)
+    previous = coverage_fraction(frame)
+    for rows in (2, 5, 8):
+        blanked = frame.copy()
+        blanked[:rows, :] = np.nan
+        current = coverage_fraction(blanked)
+        assert current < previous
+        previous = current
+
+
+def test_coverage_fraction_on_a_regridded_off_disk_frame():
+    """A target grid mostly outside the source footprint must report low coverage."""
+    src = np.full((16, 16), 250.0, dtype=np.float32)
+    lats = np.linspace(10.0, 0.0, 16)
+    lons = np.linspace(70.0, 80.0, 16)
+    # Target grid only one quarter overlapped by the source extent.
+    grid = TargetGrid(lat_min=0.0, lat_max=20.0, lon_min=70.0, lon_max=90.0,
+                      resolution_deg=1.0)
+    out = regrid_latlon(src, lats, lons, grid)
+
+    fraction = coverage_fraction(out)
+    assert 0.0 < fraction < 0.5, f"expected partial coverage, got {fraction}"

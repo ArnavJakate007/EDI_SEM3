@@ -115,3 +115,43 @@ def prepare_cache(
 def load_cached(ref: FrameRef) -> np.ndarray:
     """Load a cached frame as float32 Kelvin."""
     return np.load(ref.path).astype(np.float32, copy=False)
+
+
+def timestamp_from_cache_path(path: str | Path) -> datetime:
+    """Inverse of `cache_path_for`: recover a frame's timestamp from its cache path.
+
+    Expects `.../<YYYYMMDD>/<HHMMSS>.npy`.
+    """
+    p = Path(path)
+    try:
+        stamp = datetime.strptime(f"{p.parent.name}{p.stem}", "%Y%m%d%H%M%S")
+    except ValueError as exc:
+        raise ValueError(f"not a cache frame path: {p}") from exc
+    return stamp.replace(tzinfo=timezone.utc)
+
+
+def scan_cache(cache_root: str | Path, sensor: str) -> list[FrameRef]:
+    """Recover frame references by walking a cache tree.
+
+    Prefers nothing: this is the fallback for when `index.json` is absent or stale.
+    Unparseable paths are skipped with a debug log rather than raising.
+    """
+    root = Path(cache_root)
+    refs: list[FrameRef] = []
+    for path in sorted(root.rglob("*.npy")):
+        try:
+            refs.append(FrameRef(timestamp_from_cache_path(path), path, sensor))
+        except ValueError:
+            log.debug("skipping non-frame cache file %s", path)
+    return sorted(refs, key=lambda r: (r.timestamp, str(r.path)))
+
+
+def load_or_scan_index(cache_root: str | Path, sensor: str) -> list[FrameRef]:
+    """Frame refs from `<cache_root>/index.json`, falling back to a cache walk."""
+    index_path = Path(cache_root) / "index.json"
+    if index_path.exists():
+        refs = [r for r in load_index(index_path) if r.sensor == sensor]
+        if refs:
+            return refs
+        log.warning("%s has no %s entries; falling back to a cache scan", index_path, sensor)
+    return scan_cache(cache_root, sensor)

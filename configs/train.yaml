@@ -1,0 +1,63 @@
+# Multi-sensor pretraining plan.
+#
+# `splits` names the per-sensor config that supplies each split's cache_root, target
+# grid, cadence and normalisation, so no data path is ever hard-coded in source.
+splits:
+  # Pretraining pools the high-cadence sensors. These are concatenated, and each is
+  # split chronologically into train/val independently (see data/loaders.py).
+  pretrain:
+    - configs/goes19.yaml
+    - configs/himawari.yaml
+
+  # Fine-tuning uses INSAT-3DR staggered mode only (15-minute interleaved product).
+  finetune:
+    - configs/insat_staggered.yaml
+
+  # Held out entirely. This is the native ~4-minute ground truth that validates the
+  # project's central claim, so it must never appear in train/val/finetune.
+  rapid_scan_eval:
+    - configs/insat_rapidscan.yaml
+
+loader:
+  batch_size: 8
+  num_workers: 0          # >0 needs the spawn guard on Windows; safe default is 0.
+  tile_size: 256
+  val_fraction: 0.15      # last 15% of each sensor's time range, chronologically
+  augment: true
+  min_valid_fraction: 0.5
+  seed: 1337
+  # Reject any finetune frame within this many minutes of a held-out rapid-scan
+  # frame. 0 would catch only exact collisions; 30 also rejects near-duplicate
+  # scenes, which leak just as effectively.
+  rapid_scan_guard_minutes: 30.0
+
+model:
+  base_channels: 64
+  scales: [4, 2, 1]
+  use_raft_init: true
+  flow_channels: 96
+  flow_radius: 3
+  flow_iters: 4
+
+loss:
+  w_recon: 1.0
+  w_ssim: 0.25
+  w_smooth: 0.05
+  w_consistency: 0.10
+  w_radiometric: 0.05
+
+train:
+  tile_size: 256
+  tile_overlap: 32
+  batch_size: 8
+  lr: 2.0e-4
+  weight_decay: 1.0e-5
+  epochs: 40
+  amp: true
+  num_workers: 0
+  seed: 1337
+  checkpoint_dir: checkpoints/pretrain
+  val_fraction: 0.15
+
+renorm_dir: configs/renorm
+log_csv: runs/pretrain/metrics.csv

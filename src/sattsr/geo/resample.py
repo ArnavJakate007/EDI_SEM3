@@ -141,3 +141,17 @@ def regrid_scattered(
     hit = np.isfinite(dist) & (idx < vals.size)
     out[hit] = vals[idx[hit]]
     return out.reshape(grid.shape)
+
+
+def coverage_fraction(frame: np.ndarray) -> float:
+    """Fraction of `frame` carrying a usable observation, in [0, 1].
+
+    Regridding onto a fixed lat-lon target leaves NaN wherever the target cell falls
+    outside the sensor's disc or the source pixel was flagged. A frame that is mostly
+    off-disc is worse than useless for training -- it contributes a tile of zeros and
+    a mask of zeros -- so preprocessing gates on this before caching.
+    """
+    a = np.asarray(frame)
+    if a.size == 0:
+        return 0.0
+    return float(np.count_nonzero(np.isfinite(a)) / a.size)

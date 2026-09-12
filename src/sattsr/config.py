@@ -91,3 +91,49 @@ def load_config(path: str | Path) -> Config:
     """Load and validate a YAML config file."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     return Config.model_validate(raw)
+
+
+class LoaderConfig(_Base):
+    """Batching and tiling knobs shared by every split."""
+
+    batch_size: int = 8
+    num_workers: int = 0
+    tile_size: int = 256
+    val_fraction: float = 0.15
+    augment: bool = True
+    min_valid_fraction: float = 0.5
+    seed: int = 1337
+    #: Minimum separation, in minutes, required between any finetune frame and any
+    #: held-out rapid-scan frame. 0 checks only exact collisions; a positive value
+    #: also rejects near-duplicate scenes minutes apart.
+    rapid_scan_guard_minutes: float = 0.0
+
+
+class SplitsConfig(_Base):
+    """Which sensor configs feed which split.
+
+    Paths are config files, so every cache/raw location still comes from a YAML and
+    nothing is hard-coded in source.
+    """
+
+    pretrain: list[Path] = []
+    finetune: list[Path] = []
+    rapid_scan_eval: list[Path] = []
+
+
+class PretrainConfig(_Base):
+    """Top-level plan for dataloader construction and pretraining."""
+
+    splits: SplitsConfig = SplitsConfig()
+    loader: LoaderConfig = LoaderConfig()
+    model: ModelConfig = ModelConfig()
+    loss: LossConfig = LossConfig()
+    train: TrainConfig = TrainConfig()
+    renorm_dir: Path | None = None
+    log_csv: Path | None = None
+
+
+def load_pretrain_config(path: str | Path) -> PretrainConfig:
+    """Load and validate the multi-sensor training plan (configs/train.yaml)."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    return PretrainConfig.model_validate(raw)
