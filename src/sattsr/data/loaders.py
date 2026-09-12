@@ -96,6 +96,20 @@ class TaggedTripletDataset(Dataset):
         return sample
 
 
+class EpochAwareConcatDataset(ConcatDataset):
+    """ConcatDataset that forwards `set_epoch` to its members.
+
+    `train.loop.fit` calls `dataset.set_epoch(epoch)` to re-roll tile choice and
+    augmentation each epoch. Plain ConcatDataset has no such method, so a
+    concatenated pretraining set would silently reuse epoch 0's tiles forever.
+    """
+
+    def set_epoch(self, epoch: int) -> None:
+        for dataset in self.datasets:
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch)
+
+
 def mixed_sensor_collate(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Collate a possibly mixed-sensor batch.
 
@@ -346,7 +360,9 @@ def build_dataloaders(
         if not datasets:
             log.warning("split %r is empty; no loader built for it", name)
             return
-        combined: Dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+        combined: Dataset = (
+            datasets[0] if len(datasets) == 1 else EpochAwareConcatDataset(datasets)
+        )
         loader = _loader(combined, loader_cfg, shuffle=shuffle)
         loader.renorm_registry = renorm_registry        # type: ignore[attr-defined]
         loaders[name] = loader

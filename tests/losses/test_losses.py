@@ -11,7 +11,7 @@ from sattsr.losses.functional import (
     radiometric_consistency,
     warp_consistency,
 )
-from sattsr.losses.ssim import SSIM, SSIMLoss
+from sattsr.losses.ssim import MSSSIM, SSIM, MSSSIMLoss, SSIMLoss
 
 # --------------------------------------------------------------------------- functional
 
@@ -194,3 +194,109 @@ def test_invalid_pixels_are_ignored():
     batch["valid"][:, :, :8, :] = 0.0         # mask the same strip out
     with_mask = float(CompositeLoss(LossConfig())(out, batch)[1]["recon"])
     assert with_mask < with_all
+
+
+# ------------------------------------------------------------------------- MS-SSIM
+
+
+def test_ms_ssim_of_an_image_with_itself_is_one():
+    a = torch.rand(2, 1, 64, 64)
+    assert float(MSSSIM()(a, a)) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_ms_ssim_drops_when_noise_is_added():
+    torch.manual_seed(0)
+    a = torch.rand(2, 1, 64, 64)
+    noisy = (a + 0.3 * torch.randn_like(a)).clamp(0, 1)
+    assert float(MSSSIM()(a, noisy)) < float(MSSSIM()(a, a))
+
+
+def test_ms_ssim_loss_is_one_minus_ms_ssim():
+    torch.manual_seed(1)
+    a, b = torch.rand(1, 1, 64, 64), torch.rand(1, 1, 64, 64)
+    assert float(MSSSIMLoss()(a, b)) == pytest.approx(1.0 - float(MSSSIM()(a, b)), abs=1e-6)
+
+
+def test_ms_ssim_loss_is_differentiable():
+    a = torch.rand(1, 1, 64, 64, requires_grad=True)
+    MSSSIMLoss()(a, torch.rand(1, 1, 64, 64)).backward()
+    assert a.grad is not None and float(a.grad.abs().sum()) > 0.0
+
+
+@pytest.mark.parametrize(("size", "expected_levels"), [(32, 2), (64, 3), (256, 5)])
+def test_ms_ssim_adapts_its_pyramid_to_small_inputs(size, expected_levels):
+    """A 32x32 tile must not error just because five scales do not fit in it."""
+    metric = MSSSIM()
+    assert metric.usable_levels(size, size) == expected_levels
+    a = torch.rand(1, 1, size, size)
+    assert float(metric(a, a)) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_ms_ssim_is_more_scale_sensitive_than_single_scale_ssim():
+    """Blurring destroys fine detail; MS-SSIM should notice at least as much."""
+    torch.manual_seed(2)
+    a = torch.rand(1, 1, 64, 64)
+    blurred = torch.nn.functional.avg_pool2d(a, 4)
+    blurred = torch.nn.functional.interpolate(blurred, size=(64, 64), mode="nearest")
+    assert float(MSSSIM()(a, blurred)) < 1.0
+    assert float(SSIM()(a, blurred)) < 1.0
+
+
+# ------------------------------------------------------- composite weight sensitivity
+
+
+def test_changing_a_nonzero_weight_changes_the_total():
+    """Not just zeroing a term -- the weighting must actually scale it."""
+    out, batch = _out_and_batch()
+    base = LossConfig(w_recon=1.0, w_ssim=0.25, w_smooth=0.05,
+                      w_consistency=0.10, w_radiometric=0.05)
+    heavier = base.model_copy(update={"w_ssim": 0.75})
+
+    total_base, parts_base = CompositeLoss(base)(out, batch)
+    total_heavy, parts_heavy = CompositeLoss(heavier)(out, batch)
+
+    assert float(total_heavy) != pytest.approx(float(total_base))
+    assert parts_heavy["ssim"] == pytest.approx(3.0 * parts_base["ssim"], rel=1e-5)
+
+
+def _out_and_batch_all_terms_active():
+    """Like `_out_and_batch`, but with every loss term genuinely non-zero.
+
+    The plain fixture uses a zero flow field and identical warped views, which makes
+    the smoothness and consistency terms exactly 0 -- so those two weights cannot
+    move the total and nothing exercises them.
+    """
+    out, batch = _out_and_batch()
+    torch.manual_seed(3)
+    out["flow"] = torch.randn(2, 4, 32, 32, requires_grad=True)
+    out["warped0"] = torch.rand(2, 1, 32, 32)
+    out["warped2"] = torch.rand(2, 1, 32, 32)
+    return out, batch
+
+
+def test_the_active_fixture_really_activates_every_term():
+    _, parts = CompositeLoss(LossConfig())(*_out_and_batch_all_terms_active())
+    for name in ("recon", "ssim", "smooth", "consistency", "radiometric"):
+        assert parts[name] > 0.0, f"{name} is inert in this fixture"
+
+
+@pytest.mark.parametrize(
+    "field", ["w_recon", "w_ssim", "w_smooth", "w_consistency", "w_radiometric"]
+)
+def test_every_weight_independently_moves_the_total(field):
+    out, batch = _out_and_batch_all_terms_active()
+    base = LossConfig()
+    bumped = base.model_copy(update={field: getattr(base, field) + 0.5})
+    total_base, _ = CompositeLoss(base)(out, batch)
+    total_bumped, _ = CompositeLoss(bumped)(out, batch)
+    assert float(total_bumped) > float(total_base), f"{field} has no effect on the total"
+
+
+def test_every_component_is_finite_and_non_negative():
+    """A NaN in any term silently poisons the whole run; catch it here."""
+    for perfect in (True, False):
+        _, parts = CompositeLoss(LossConfig())(*_out_and_batch(perfect=perfect))
+        for name, value in parts.items():
+            assert value == value, f"{name} is NaN"
+            assert abs(value) != float("inf"), f"{name} is infinite"
+            assert value >= 0.0, f"{name} is negative ({value})"

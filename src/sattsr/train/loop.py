@@ -69,7 +69,12 @@ def _run_epoch(
     seen = 0
 
     for batch in loader:
-        batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+        # Mixed-sensor batches carry per-sample `sensor`/`scan_mode` strings alongside
+        # the tensors (see data/loaders.mixed_sensor_collate); those have no .to().
+        batch = {
+            k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
+            for k, v in batch.items()
+        }
         n = int(batch["i0"].shape[0])
 
         with torch.set_grad_enabled(training):
