@@ -21,6 +21,7 @@ from sattsr.eval.baselines import run_baseline
 from sattsr.eval.events import EventCategory, EventThresholds, category_counts, classify_event
 from sattsr.eval.metrics import metric_suite
 from sattsr.eval.motion import motion_suite
+from sattsr.eval.plots import category_rows, margin, write_category_charts
 from sattsr.infer.recursive import predict_midframe
 from sattsr.models.interpolator import FrameInterpolator
 
@@ -56,6 +57,24 @@ def _clean(value: float | None) -> float | None:
     return float(value) if math.isfinite(float(value)) else None
 
 
+def _subsample(triplets: Sequence[Triplet], limit: int | None) -> list[Triplet]:
+    """Take `limit` triplets spread EVENLY across the series, not the first N.
+
+    A contiguous prefix is one weather situation over a few hours, so it collapses the
+    event breakdown: a 12-triplet prefix of this archive scored 12 stratiform and zero
+    convective, clear or cyclonic, which makes the per-category comparison vacuous.
+    Even spacing samples the whole time range, so the categories populate in roughly
+    the proportion the archive actually contains.
+    """
+    ordered = sorted(triplets, key=lambda t: t.t1.timestamp)
+    if limit is None or limit >= len(ordered):
+        return ordered
+    if limit <= 0:
+        return []
+    step = len(ordered) / limit
+    return [ordered[min(len(ordered) - 1, int(i * step))] for i in range(limit)]
+
+
 def evaluate_triplets(
     model: FrameInterpolator,
     triplets: Sequence[Triplet],
@@ -74,7 +93,7 @@ def evaluate_triplets(
     if unknown:
         raise KeyError(f"unknown evaluation method(s): {unknown}")
 
-    items: Sequence[Triplet] = list(triplets)[: limit if limit is not None else len(triplets)]
+    items: Sequence[Triplet] = _subsample(triplets, limit)
     iterator: Any = items
     if progress:
         from tqdm import tqdm
@@ -155,6 +174,46 @@ def _sanitise(node: Any) -> Any:
     return node
 
 
+def head_to_head(
+    summary: dict[str, Any], *, metric: str = "psnr"
+) -> dict[str, Any]:
+    """Model vs Farneback per event category, decided rather than left implicit.
+
+    The project's premise is that classical optical flow fails specifically on fast,
+    non-linear cloud motion even when it is competitive on average. A pooled number
+    cannot show that either way, and three similar per-category numbers make the
+    reader do the subtraction. This records the margin and the verdict directly, so
+    "does it beat Farneback on the cases that matter" is answerable by lookup.
+    """
+    rows = category_rows(summary, metric)
+    per_category = {}
+    for row in rows:
+        m = margin(row["values"], metric)
+        per_category[row["category"]] = {
+            "n": row["n"],
+            "metric": metric,
+            "model": row["values"].get("model"),
+            "farneback": row["values"].get("farneback"),
+            "linear": row["values"].get("linear"),
+            "margin_vs_farneback": m,
+            "beats_farneback": None if m is None else bool(m > 0),
+        }
+
+    overall = summary.get("overall", {}) or {}
+    pooled = margin(
+        {k: (overall.get(k) or {}).get(metric) for k in ("model", "farneback", "linear")},
+        metric,
+    )
+    wins = [c for c, v in per_category.items() if v["beats_farneback"]]
+    return {
+        "metric": metric,
+        "pooled_margin_vs_farneback": pooled,
+        "pooled_beats_farneback": None if pooled is None else bool(pooled > 0),
+        "categories_won": sorted(wins),
+        "by_category": per_category,
+    }
+
+
 def write_report(
     path: str | Path,
     results: Sequence[SampleResult],
@@ -172,6 +231,7 @@ def write_report(
         "metric_keys": list(METRIC_KEYS),
         "category_disclaimer": CATEGORY_DISCLAIMER,
         "summary": _sanitise(aggregate(results)),
+        "head_to_head": _sanitise(head_to_head(aggregate(results))),
         "samples": [
             {
                 "timestamp": r.timestamp.astimezone(timezone.utc).isoformat(),
@@ -185,6 +245,7 @@ def write_report(
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    write_category_charts(report, out.parent)
     return report
 
 

@@ -17,6 +17,10 @@ RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ANIMATION_KINDS = frozenset({"original", "interpolated"})
 
 
+#: Charts written beside the report by eval.plots.write_category_charts.
+CHART_NAMES = ("category_margin", "category_metric")
+
+
 def _safe_run_dir(runs_dir: Path, run_id: str) -> Path:
     """Resolve a run directory, refusing anything that escapes `runs_dir`."""
     if not RUN_ID_RE.match(run_id) or run_id in {".", ".."}:
@@ -67,6 +71,7 @@ def create_app(runs_dir: str | Path, *, static_dir: Path | None = None) -> FastA
                     "input_cadence_minutes": manifest.input_cadence_minutes,
                     "output_cadence_minutes": manifest.output_cadence_minutes,
                     "has_report": (entry / "report.json").is_file(),
+                    "has_charts": (entry / "category_margin.svg").is_file(),
                 }
             )
         summaries.sort(key=lambda s: str(s["created_at"]), reverse=True)
@@ -99,6 +104,33 @@ def create_app(runs_dir: str | Path, *, static_dir: Path | None = None) -> FastA
         run_dir = _safe_run_dir(runs_root, run_id)
         path = _require_file(run_dir / "report.json", "no report for this run")
         return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+    @app.get("/api/runs/{run_id}/head-to-head")
+    def head_to_head(run_id: str) -> JSONResponse:
+        """The model-vs-Farneback verdict per event category.
+
+        Served separately from the full report because it is the one thing the
+        dashboard needs to show prominently, and the report carries a per-sample
+        array that can run to thousands of entries.
+        """
+        run_dir = _safe_run_dir(runs_root, run_id)
+        path = _require_file(run_dir / "report.json", "no report for this run")
+        report = json.loads(path.read_text(encoding="utf-8"))
+        verdict = report.get("head_to_head")
+        if verdict is None:
+            raise HTTPException(
+                status_code=404,
+                detail="this report predates the head-to-head breakdown; re-run evaluate",
+            )
+        return JSONResponse(verdict)
+
+    @app.get("/api/runs/{run_id}/charts/{name}.svg")
+    def chart(run_id: str, name: str) -> FileResponse:
+        if name not in CHART_NAMES:
+            raise HTTPException(status_code=404, detail=f"unknown chart: {name}")
+        run_dir = _safe_run_dir(runs_root, run_id)
+        path = _require_file(run_dir / f"{name}.svg", "chart not generated")
+        return FileResponse(path, media_type="image/svg+xml")
 
     @app.get("/api/runs/{run_id}/download")
     def download(run_id: str) -> FileResponse:

@@ -180,3 +180,104 @@ def test_dashboard_is_served_at_the_root(tmp_path):
 def test_api_routes_still_win_over_the_static_mount(tmp_path):
     client = TestClient(create_app(tmp_path / "runs"))
     assert client.get("/api/health").json()["status"] == "ok"
+
+
+# --------------------------------------- event-stratified endpoints
+
+
+def _run_with_verdict(tmp_path):
+    """A run directory whose report carries the head-to-head breakdown."""
+    import json
+
+    from sattsr.eval.plots import write_category_charts
+
+    run = tmp_path / "r1"
+    run.mkdir(parents=True)
+    summary = {
+        "counts": {"stratiform": 5, "convective": 4},
+        "overall": {"model": {"psnr": 38.0}, "farneback": {"psnr": 37.0},
+                    "linear": {"psnr": 33.0}},
+        "by_category": {
+            "stratiform": {"model": {"psnr": 38.0}, "farneback": {"psnr": 39.0},
+                           "linear": {"psnr": 33.0}},
+            "convective": {"model": {"psnr": 36.0}, "farneback": {"psnr": 34.0},
+                           "linear": {"psnr": 30.0}},
+        },
+    }
+    from sattsr.eval.report import head_to_head
+
+    report = {"run_id": "r1", "summary": summary, "head_to_head": head_to_head(summary)}
+    (run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    write_category_charts(report, run)
+    (run / "manifest.json").write_text(json.dumps({
+        "run_id": "r1", "sensor": "goes19",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "input_cadence_minutes": 10.0, "output_cadence_minutes": 5.0,
+        "factor": 2, "n_original": 3, "n_synthetic": 2,
+        "output_nc": "output.nc", "frames": [], "checkpoint": "best.pt",
+        "model_version": "0.1.0",
+    }), encoding="utf-8")
+    return run
+
+
+def test_head_to_head_endpoint_serves_the_verdict(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from web.app import create_app
+
+    _run_with_verdict(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    body = client.get("/api/runs/r1/head-to-head").json()
+    assert body["categories_won"] == ["convective"]
+    assert body["by_category"]["stratiform"]["beats_farneback"] is False
+
+
+def test_charts_are_served_as_svg(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from web.app import create_app
+
+    _run_with_verdict(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    for name in ("category_margin", "category_metric"):
+        r = client.get(f"/api/runs/r1/charts/{name}.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+
+
+def test_unknown_chart_name_is_rejected(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from web.app import create_app
+
+    _run_with_verdict(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    assert client.get("/api/runs/r1/charts/evil.svg").status_code == 404
+
+
+def test_runs_listing_flags_chart_availability(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from web.app import create_app
+
+    _run_with_verdict(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    assert client.get("/api/runs").json()[0]["has_charts"] is True
+
+
+def test_a_report_without_the_verdict_says_to_rerun(tmp_path):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from web.app import create_app
+
+    run = _run_with_verdict(tmp_path)
+    report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+    report.pop("head_to_head")
+    (run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    client = TestClient(create_app(tmp_path))
+    r = client.get("/api/runs/r1/head-to-head")
+    assert r.status_code == 404
+    assert "re-run evaluate" in r.json()["detail"]

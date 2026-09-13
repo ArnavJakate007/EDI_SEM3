@@ -95,6 +95,31 @@ def raw_file_count(path: Path) -> int:
     return sum(1 for f in path.rglob("*") if f.is_file() and f.suffix in RAW_SUFFIXES)
 
 
+def day_window_cached(
+    cache_root: Path, day: date, lo: int, hi: int, *, min_fraction: float = 0.9
+) -> bool:
+    """True if this day's hour window is already sufficiently cached.
+
+    Raising --days-per-month re-picks a denser set of days that OVERLAPS the sparser
+    set a previous run already fetched (2/month gives [10, 21]; 5/month gives
+    [5, 10, 16, 21, 26]). Raw was deleted after caching, so without this check those
+    overlapping days would be downloaded again in full -- roughly 40% of the transfer
+    on a 2 -> 5 step, which is hours at this link speed.
+
+    A partially-cached day is still re-fetched: `min_fraction` guards against treating
+    a day that only half-succeeded as done.
+    """
+    day_dir = cache_root / day.strftime("%Y%m%d")
+    if not day_dir.is_dir():
+        return False
+    expected = (hi - lo + 1) * 6            # 10-minute cadence
+    have = sum(
+        1 for f in day_dir.glob("*.npy")
+        if f.stem[:2].isdigit() and lo <= int(f.stem[:2]) <= hi
+    )
+    return have >= expected * min_fraction
+
+
 def month_days(year: int, month: int, count: int) -> list[int]:
     """Pick `count` days spread across the month, avoiding the edges."""
     last = calendar.monthrange(year, month)[1]
@@ -131,14 +156,24 @@ def run(cmd: list[str], *, label: str) -> tuple[int, str]:
 
 
 def download_month(
-    sensor: str, year: int, month: int, days: list[int], hours_per_day: int, jobs: int
-) -> None:
-    """Fetch this month's chosen days, each on its own rotating hour window."""
+    sensor: str, year: int, month: int, days: list[int], hours_per_day: int, jobs: int,
+    *, cache_root: Path | None = None,
+) -> int:
+    """Fetch this month's chosen days, each on its own rotating hour window.
+
+    Returns how many days were skipped because the cache already covers them.
+    """
+    skipped = 0
     for i, day in enumerate(days):
         lo, hi = HOUR_WINDOWS[i % len(HOUR_WINDOWS)]
         if hours_per_day != 8:
             hi = lo + hours_per_day - 1
         d = date(year, month, day)
+
+        if cache_root is not None and day_window_cached(cache_root, d, lo, hi):
+            log.info("    %s %02d-%02dz already cached; not re-downloading", d, lo, hi)
+            skipped += 1
+            continue
         if sensor == "goes19":
             cmd = [sys.executable, "scripts/download_goes19.py",
                    "--start", d.isoformat(), "--end", d.isoformat(),
@@ -152,6 +187,7 @@ def download_month(
         for line in out.splitlines():
             if "TOTAL" in line or "ERROR" in line:
                 log.info("    %s", line.split(": ", 2)[-1])
+    return skipped
 
 
 def process_month(sensor: str, config: Path, workers: int) -> str:
@@ -258,7 +294,12 @@ def main(argv: list[str] | None = None) -> int:
             before_raw = dir_bytes(raw_root)
             before_cache = len(list(cache_root.rglob("*.npy")))
 
-            download_month(sensor, year, month, days, args.hours_per_day, args.jobs)
+            n_skipped = download_month(
+                sensor, year, month, days, args.hours_per_day, args.jobs,
+                cache_root=cache_root,
+            )
+            if n_skipped:
+                result.notes.append(f"{n_skipped}/{len(days)} day(s) already cached")
             after_raw = dir_bytes(raw_root)
             result.downloaded_gb = max(0.0, (after_raw - before_raw) / 1e9)
 

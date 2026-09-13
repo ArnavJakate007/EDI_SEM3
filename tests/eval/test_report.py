@@ -130,3 +130,57 @@ def test_evaluate_triplets_rejects_an_unknown_method(tmp_path):
     with pytest.raises(KeyError):
         evaluate_triplets(model, _triplets(tmp_path), device=torch.device("cpu"), norm=NORM,
                           tile_size=32, tile_overlap=8, methods=("model", "magic"))
+
+
+# --------------------------------------------------- representative subsampling
+
+
+def _fake_triplets(n):
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from sattsr.data.index import FrameRef
+    from sattsr.data.triplets import Triplet
+
+    t0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    def ref(k):
+        ts = t0 + timedelta(minutes=10 * k)
+        return FrameRef(ts, Path(f"{k}.npy"), "goes19")
+    return [Triplet(ref(i), ref(i + 1), ref(i + 2)) for i in range(n)]
+
+
+def test_subsample_spreads_across_the_whole_range_not_a_prefix():
+    """A contiguous prefix is one weather situation and collapses the event split."""
+    from sattsr.eval.report import _subsample
+
+    trips = _fake_triplets(1000)
+    picked = _subsample(trips, 10)
+    assert len(picked) == 10
+    first, last = picked[0].t1.timestamp, picked[-1].t1.timestamp
+    span = (last - first).total_seconds()
+    full = (trips[-1].t1.timestamp - trips[0].t1.timestamp).total_seconds()
+    assert span > full * 0.9, "the sample must cover almost the whole series"
+
+
+def test_subsample_is_ordered_and_unique():
+    from sattsr.eval.report import _subsample
+
+    picked = _subsample(_fake_triplets(500), 25)
+    stamps = [t.t1.timestamp for t in picked]
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == 25
+
+
+def test_subsample_returns_everything_when_limit_exceeds_the_series():
+    from sattsr.eval.report import _subsample
+
+    trips = _fake_triplets(7)
+    assert len(_subsample(trips, 100)) == 7
+    assert len(_subsample(trips, None)) == 7
+
+
+def test_subsample_handles_degenerate_limits():
+    from sattsr.eval.report import _subsample
+
+    assert _subsample(_fake_triplets(5), 0) == []
+    assert len(_subsample(_fake_triplets(5), 1)) == 1
