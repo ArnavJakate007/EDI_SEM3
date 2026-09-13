@@ -93,3 +93,64 @@ def test_load_cached_missing_file_raises(tmp_path):
                    "goes19")
     with pytest.raises(FileNotFoundError):
         load_cached(ref)
+
+
+# ------------------------------------------------------- orphan cache detection
+
+
+def _cache_with_index(tmp_path, n=3):
+    """A cache tree plus a matching index.json."""
+    from sattsr.data.index import save_index
+
+    root = tmp_path / "cache" / "goes19"
+    refs = []
+    for i in range(n):
+        ts = datetime(2026, 2, 10, 6, 10 * i, tzinfo=timezone.utc)
+        dest = root / ts.strftime("%Y%m%d") / f"{ts.strftime('%H%M%S')}.npy"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        np.save(dest, np.zeros((4, 4), dtype=np.float32))
+        refs.append(FrameRef(ts, dest, "goes19"))
+    save_index(refs, root / "index.json")
+    return root
+
+
+def test_a_consistent_cache_has_no_orphans(tmp_path):
+    from sattsr.data.index import assert_cache_matches_index, find_orphan_cache_files
+
+    root = _cache_with_index(tmp_path)
+    assert find_orphan_cache_files(root, "goes19") == []
+    assert_cache_matches_index(root, "goes19")          # must not raise
+
+
+def test_a_stale_nested_directory_is_detected_as_orphaned(tmp_path):
+    """Exactly the cache/goes19/goes19/ layout the path bug used to produce."""
+    from sattsr.data.index import find_orphan_cache_files
+
+    root = _cache_with_index(tmp_path)
+    stale = root / "goes19" / "20260210"
+    stale.mkdir(parents=True)
+    np.save(stale / "160021.npy", np.zeros((4, 4), dtype=np.float32))
+
+    orphans = find_orphan_cache_files(root, "goes19")
+    assert len(orphans) == 1
+    assert orphans[0].name == "160021.npy"
+
+
+def test_assert_cache_matches_index_fails_loudly(tmp_path):
+    from sattsr.data.index import assert_cache_matches_index
+
+    root = _cache_with_index(tmp_path)
+    np.save(root / "20260210" / "999999.npy", np.zeros((4, 4), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="not in index.json"):
+        assert_cache_matches_index(root, "goes19")
+
+
+def test_orphan_check_is_silent_without_an_index(tmp_path):
+    """No index means nothing to compare against -- not an error."""
+    from sattsr.data.index import find_orphan_cache_files
+
+    root = tmp_path / "cache" / "goes19" / "20260210"
+    root.mkdir(parents=True)
+    np.save(root / "060000.npy", np.zeros((4, 4), dtype=np.float32))
+    assert find_orphan_cache_files(tmp_path / "cache" / "goes19", "goes19") == []

@@ -37,7 +37,8 @@ def test_the_required_insat_validation_configs_exist():
 def test_insat_validation_configs_use_their_documented_cadences():
     rapid = load_config(CONFIG_DIR / "insat_rapidscan.yaml")
     staggered = load_config(CONFIG_DIR / "insat_staggered.yaml")
-    assert rapid.data.cadence_minutes == pytest.approx(4.0)
+    # Native rapid-scan cadence is 4 min 30 s, not a clean 4 minutes.
+    assert rapid.data.cadence_minutes == pytest.approx(4.5)
     assert staggered.data.cadence_minutes == pytest.approx(15.0)
     assert rapid.data.sensor.startswith("insat")
     assert staggered.data.sensor.startswith("insat")

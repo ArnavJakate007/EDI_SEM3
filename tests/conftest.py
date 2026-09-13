@@ -128,3 +128,78 @@ def goes_dir(tmp_path: Path) -> Path:
     root = tmp_path / "goes"
     make_goes_series(root, 5)
     return root
+
+
+def make_isatss_tile(
+    path: Path,
+    timestamp: datetime,
+    *,
+    tile: int = 1,
+    channel: int = 13,
+    size: int = 40,
+    lon_origin: float = 140.7,
+    # Chosen so one tile spans the near-nadir scan angles a small test grid maps to
+    # (x -4900..+6800 urad, y +/-5800 urad for a 4-degree box at 140.7E).
+    x0_urad: float = -5600.0,
+    y0_urad: float = 7800.0,
+    step_urad: float = 400.0,
+) -> Path:
+    """Write a minimal AHI-L2-FLDK-ISatSS tile.
+
+    Mirrors the real product as verified against a downloaded file: `Sectorized_CMI`
+    already in Kelvin, a `fixedgrid_projection` whose ellipsoid attrs are named
+    `semi_major` / `semi_minor`, `sweep_angle_axis` of `y`, and x/y in MICRORADIAN.
+    """
+    yy, xx = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
+    bt = (240.0 + 0.4 * xx + 0.3 * yy).astype(np.float32)
+
+    x = (x0_urad + step_urad * np.arange(size)).astype(np.float64)
+    y = (y0_urad - step_urad * np.arange(size)).astype(np.float64)
+
+    ds = xr.Dataset(
+        {
+            "Sectorized_CMI": (
+                ("y", "x"), bt,
+                {"standard_name": "brightness_temperature", "units": "kelvin",
+                 "grid_mapping": "fixedgrid_projection"},
+            ),
+            "fixedgrid_projection": ((), np.int32(0), {
+                "grid_mapping_name": "geostationary",
+                "latitude_of_projection_origin": 0.0,
+                "longitude_of_projection_origin": lon_origin,
+                "semi_major": 6378137.0,
+                "semi_minor": 6356752.3,
+                "perspective_point_height": 35785863.0,
+                "sweep_angle_axis": "y",
+            }),
+        },
+        coords={
+            "x": ("x", x, {"units": "microradian"}),
+            "y": ("y", y, {"units": "microradian"}),
+        },
+        attrs={"number_product_tiles": 76, "channel_id": channel},
+    )
+    doy = timestamp.timetuple().tm_yday
+    stamp = f"{timestamp.year}{doy:03d}{timestamp:%H%M%S}"       # 13 digits, no tenths
+    name = (
+        f"OR_HFD-020-B12-M1C{channel:02d}-T{tile:03d}_GH8_s{stamp}_c{stamp}.nc"
+    )
+    out = path / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(out)
+    return out
+
+
+def make_isatss_scan(
+    root: Path, timestamp: datetime, *, n_tiles: int = 3, size: int = 40
+) -> list[Path]:
+    """One scan split across `n_tiles` side-by-side tiles, as the real product is."""
+    step = 400.0
+    span = size * step
+    return [
+        make_isatss_tile(
+            root, timestamp, tile=i + 1, size=size,
+            x0_urad=-5600.0 + i * span, step_urad=step,
+        )
+        for i in range(n_tiles)
+    ]

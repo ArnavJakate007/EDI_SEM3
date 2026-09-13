@@ -68,8 +68,14 @@ class GeosProjection:
             }
         )
 
-    def latlon_to_index(self, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Map geographic coordinates to fractional (row, col) in the sensor array."""
+    def latlon_to_angle(self, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Map geographic coordinates to (y, x) scan angles in radians.
+
+        Split out from `latlon_to_index` because this half depends only on the
+        projection *parameters*, not on the x/y arrays. A tiled product whose tiles
+        all share one projection can therefore pay for the pyproj transform once
+        instead of once per tile.
+        """
         tf = pyproj.Transformer.from_crs("EPSG:4326", self._crs(), always_xy=True)
         px, py = tf.transform(np.asarray(lon, float), np.asarray(lat, float))
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -78,12 +84,20 @@ class GeosProjection:
         # pyproj returns +/-inf for points that do not project (off the visible disc)
         sx = np.where(np.isfinite(sx) & (np.abs(sx) < 1e30), sx, np.nan)
         sy = np.where(np.isfinite(sy) & (np.abs(sy) < 1e30), sy, np.nan)
+        return sy, sx
 
+    def angle_to_index(self, sy: np.ndarray, sx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Convert scan angles to fractional (row, col) in this array's own grid."""
         dx = float(self.x[1] - self.x[0])
         dy = float(self.y[1] - self.y[0])
         cols = (sx - float(self.x[0])) / dx
         rows = (sy - float(self.y[0])) / dy
         return rows, cols
+
+    def latlon_to_index(self, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Map geographic coordinates to fractional (row, col) in the sensor array."""
+        sy, sx = self.latlon_to_angle(lat, lon)
+        return self.angle_to_index(sy, sx)
 
 
 def regrid_geos(src: np.ndarray, proj: GeosProjection, grid: TargetGrid) -> np.ndarray:

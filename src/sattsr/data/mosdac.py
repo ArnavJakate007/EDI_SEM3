@@ -32,11 +32,33 @@ USER_ENV = "MOSDAC_USER"
 PASS_ENV = "MOSDAC_PASS"
 
 #: MOSDAC ships each scan mode as a distinct product stream.
+#: ASSUMPTION -- these exact strings are NOT verified against a real product listing.
 SCAN_MODE_PRODUCTS = {
     "routine": "3DIMG_L1C_ASIA_MER",
     "staggered": "3DIMG_L1C_ASIA_MER_STAGGERED",
     "rapid_scan": "3DIMG_L1C_SEC_RAPID",
 }
+
+#: What to look for in the portal if the exact product string above is absent.
+_PRODUCT_HINTS = {
+    "routine": "half-hourly full-frame Asia sector",
+    "staggered": "staggered / interleaved 15-minute Asia sector",
+    "rapid_scan": "rapid scan sector, sub-5-minute cadence",
+}
+
+#: Native cadence per scan mode, in minutes. Rapid scan is 4 min 30 s, not 4 min.
+CADENCE_MINUTES = {"routine": 30.0, "staggered": 15.0, "rapid_scan": 4.5}
+
+#: Which shipped config drives preprocessing for each mode.
+_CONFIG_FOR = {
+    "routine": "insat.yaml",
+    "staggered": "insat_staggered.yaml",
+    "rapid_scan": "insat_rapidscan.yaml",
+}
+
+#: The pattern InsatReader.timestamp_of actually applies, quoted in the instructions
+#: so the two can never drift apart.
+_TIME_PATTERN = r"_(?P<day>\d{2})(?P<mon>[A-Z]{3})(?P<year>\d{4})_(?P<hhmm>\d{4})"
 
 
 class MosdacError(RuntimeError):
@@ -85,6 +107,16 @@ def expected_filename(day: date, hour: int, minute: int, scan_mode: str) -> str:
     return f"3DIMG_{stamp}_L1C_{suffix}.h5"
 
 
+def expected_filename_at(day: date, minutes_into_day: float, scan_mode: str) -> str:
+    """Filename for the slot `minutes_into_day` after 06:00 on `day`.
+
+    Used to show a second, consecutive example in the manual instructions, which is
+    what makes the cadence concrete for whoever is downloading by hand.
+    """
+    total = 6 * 60 + int(round(minutes_into_day))
+    return expected_filename(day, (total // 60) % 24, total % 60, scan_mode)
+
+
 def manual_instructions(
     raw_root: str | Path, scan_mode: str, start: date, end: date
 ) -> str:
@@ -94,38 +126,86 @@ def manual_instructions(
     sample = expected_filename(start, 6, 0, scan_mode)
     days = (end - start).days + 1
 
+    cadence = CADENCE_MINUTES[scan_mode]
+    per_day = int(round(24 * 60 / cadence))
+    second_slot = expected_filename_at(start, cadence, scan_mode)
+
     return f"""
 MANUAL DOWNLOAD -- INSAT-3DR {scan_mode} ({start} to {end}, {days} day(s))
-{"=" * 72}
+{"=" * 74}
 
-MOSDAC has no scriptable public API, so fetch these by hand once:
+MOSDAC has no scriptable public API and ordering is an asynchronous, emailed-link
+workflow, so fetch these by hand once. Follow every step literally -- step 8's
+filename pattern is what build_manifest.py parses timestamps out of, and a renamed
+file is silently dropped from the manifest rather than erroring.
 
-  1. Sign in at {MOSDAC_BASE} (free registration; approval can take a day or two).
-  2. Open "Order Data" -> "Open Data" -> INSAT-3DR -> IMAGER.
-  3. Select product:            {product}
-  4. Set the date range:        {start} to {end}
-  5. Region:                    ASIA_MER (full Indian-region mercator sector)
-  6. Channel:                   TIR1 (10.8 um) -- the L1C product bundles all
-                                channels, which is fine; the reader picks IMG_TIR1.
-  7. Place the order. MOSDAC emails a download link, typically within a few hours.
-  8. Unpack every .h5 into EXACTLY this directory (create it if needed):
+  1. Sign in at {MOSDAC_BASE}.
+     Registration is free but ACCOUNT APPROVAL IS MANUAL and can take 1-2 working
+     days. Do this first; nothing else works until the account is active.
+
+  2. Top menu: "Data Access" -> "Order Data"  (older builds label this
+     "Open Data" -> "Order"). You must be signed in or the menu is not rendered.
+
+  3. In the left-hand tree: Satellite -> INSAT-3DR -> IMAGER -> Level-1C.
+
+  4. Product:                   {product}
+     If that exact string is not offered, pick the L1C entry whose description
+     mentions "{_PRODUCT_HINTS[scan_mode]}". See the ASSUMPTIONS note at the end.
+
+  5. Date range. The selector is INCLUSIVE of both endpoints and works in whole
+     UTC days -- there is no hour field, so you always receive complete days:
+         From: {start:%d-%m-%Y}      To: {end:%d-%m-%Y}
+     Expect roughly {per_day} files per day at this scan mode's {cadence:g}-minute
+     cadence. Orders spanning more than ~7 days are frequently rejected for size;
+     split a longer range into several orders.
+
+  6. Region / sector:           ASIA_MER  (full Indian-region Mercator sector)
+  7. Channel:                   leave ALL channels selected. The L1C product bundles
+                                them in one .h5 and the reader picks IMG_TIR1 itself;
+                                de-selecting channels sometimes yields a different
+                                product layout.
+
+  8. Place the order, wait for the email, and unpack every .h5 into EXACTLY:
 
          {dest.as_posix()}/
 
-     Keep MOSDAC's original filenames. They must match the pattern
-     `_DDMONYYYY_HHMM` that sattsr.io.insat.InsatReader.timestamp_of parses, e.g.
+     KEEP MOSDAC'S ORIGINAL FILENAMES. The parser
+     (sattsr.io.insat.InsatReader.timestamp_of) needs this substring:
+
+         _DDMONYYYY_HHMM          regex:  {_TIME_PATTERN}
+
+     so a correct name looks like:
 
          {sample}
+     and the next slot that day is:
+         {second_slot}
 
-     Do NOT rename, lowercase, or flatten the date -- the parser is case-insensitive
-     on the month but needs the day/month/year/HHMM layout intact.
+     MON is the 3-letter English month in CAPITALS (JAN FEB MAR APR MAY JUN JUL
+     AUG SEP OCT NOV DEC). DD and HHMM are zero-padded. The month match is
+     case-insensitive, but the day/month/year/HHMM ORDER must be intact. Do not
+     rename, lowercase the date, replace it with an ISO date, or flatten the
+     directory into per-day subfolders -- any of those makes the file invisible.
+
+  9. VERIFY before moving on. This must report one row per file, 0 unparseable:
+
+         python scripts/build_manifest.py --sensor insat3dr \\
+             --raw-root {Path(raw_root).as_posix()} --scan-mode {scan_mode}
+
+     If it says "excluded (timestamp not parseable)", the filenames are wrong --
+     fix them rather than proceeding, or those frames are simply lost.
 
 Then continue exactly as for the automated sensors:
 
-    python scripts/build_manifest.py --sensor insat3dr --raw-root {Path(raw_root).as_posix()}
-    python scripts/preprocess.py --sensor insat3dr --workers 4
+    python scripts/preprocess.py --sensor insat3dr \\
+        --config configs/{_CONFIG_FOR[scan_mode]} --workers 4
 
 Nothing downstream knows or cares that these arrived by hand.
+
+ASSUMPTIONS NOT YET VERIFIED (no MOSDAC account was available to check):
+  * the product-stream name "{product}"
+  * the LUT dataset name IMG_TIR1_TEMP inside the .h5
+If either turns out to differ from what the portal actually offers, tell me the
+real names and they are a one-line change each.
 """.strip()
 
 

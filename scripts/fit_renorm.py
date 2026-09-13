@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from sattsr.config import load_config  # noqa: E402
+from sattsr.data.index import assert_cache_matches_index  # noqa: E402
 from sattsr.data.normalize import RenormRegistry, fit_quantile_map  # noqa: E402
 
 log = logging.getLogger("fit_renorm")
@@ -42,10 +43,16 @@ SENSOR_CONFIGS = {
 }
 
 
-def cached_frames(cache_root: Path) -> list[Path]:
-    """Every cached .npy frame under `cache_root`, sorted for reproducibility."""
+def cached_frames(cache_root: Path, sensor: str = "") -> list[Path]:
+    """Every cached .npy frame under `cache_root`, sorted for reproducibility.
+
+    Fails loudly on orphans -- files present on disk but absent from index.json.
+    Pooling BT samples from stale frames produces a renorm map that is quietly wrong,
+    and a wrong map poisons fine-tuning several steps later with no visible symptom.
+    """
     if not cache_root.exists():
         return []
+    assert_cache_matches_index(cache_root, sensor)
     return sorted(p for p in cache_root.rglob("*.npy") if p.is_file())
 
 
@@ -133,7 +140,11 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
 
     ref_root = resolve_cache_root(args.reference_sensor, args.configs_dir)
-    ref_frames = cached_frames(ref_root) if ref_root else []
+    try:
+        ref_frames = cached_frames(ref_root, args.reference_sensor) if ref_root else []
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 2
     if not ref_frames:
         log.error(
             "reference sensor %s has no cached frames under %s -- run "
@@ -164,7 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         if sensor == args.reference_sensor:
             continue
         root = resolve_cache_root(sensor, args.configs_dir)
-        frames = cached_frames(root) if root else []
+        try:
+            frames = cached_frames(root, sensor) if root else []
+        except ValueError as exc:
+            log.error("skipping %s: %s", sensor, exc)
+            continue
         if not frames:
             log.warning("skipping %s: no cached frames under %s", sensor, root)
             continue

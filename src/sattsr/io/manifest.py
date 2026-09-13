@@ -136,17 +136,24 @@ def scan_raw_files(
         return report
 
     reader = get_reader(sensor)
-    found: set[Path] = set()
-    for pattern in reader.patterns:
-        found.update(p for p in root.rglob(pattern) if p.is_file())
 
-    by_timestamp: dict[datetime, list[Path]] = defaultdict(list)
-    for path in sorted(found):
+    # Which files exist at all -- used only to report what could not be parsed.
+    candidates: set[Path] = set()
+    for pattern in reader.patterns:
+        candidates.update(p for p in root.rglob(pattern) if p.is_file())
+    for path in sorted(candidates):
         try:
-            ts = reader.timestamp_of(path)
+            reader.timestamp_of(path)
         except (ValueError, KeyError, IndexError):
             report.unparsed.append(path)
-            continue
+
+    # Which files are FRAMES. The reader decides, because a frame is not always one
+    # file: Himawari ISatSS splits each scan into 76 tiles, and `discover` collapses
+    # them to one canonical path per scan. Globbing here instead would make every
+    # tile look like a separate frame with a duplicate timestamp.
+    by_timestamp: dict[datetime, list[Path]] = defaultdict(list)
+    for path in reader.discover(root):
+        ts = reader.timestamp_of(path)
         ts = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
         by_timestamp[ts].append(path)
         report.rows.append(

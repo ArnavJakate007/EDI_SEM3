@@ -251,16 +251,18 @@ def list_himawari_keys(
     *,
     bucket: str = HIMAWARI_BUCKETS["himawari8"],
     product: str = HIMAWARI_DEFAULT_PRODUCT,
-    band: str = "B13",
+    channel: int = 13,
     fs: Any | None = None,
 ) -> list[str]:
-    """List AHI keys on the NOAA AWS mirror for one day's requested hours.
+    """List AHI-L2-FLDK-ISatSS tile keys for one day's requested hours.
 
-    Prefix layout is `<bucket>/<product>/<YYYY>/<MM>/<DD>/<HHMM>/`. See the caveat
-    in `scripts/download_himawari8.py`: these are *not* the JAXA gridded files that
-    `sattsr.io.himawari.HimawariReader` currently parses.
+    Layout verified against the live bucket: `<bucket>/<product>/YYYY/MM/DD/HHMM/`,
+    with each 10-minute slot holding 76 tiles per channel across all 16 channels.
+    Tiles are named `OR_HFD-020-B12-M1C13-T074_GH8_s<YYYYDDDHHMMSS>_c....nc`, so the
+    channel selector is `C<nn>-T`, not the `B13` token used by the HSD/L1b products.
     """
     fs = fs or _filesystem()
+    token = f"C{int(channel):02d}-T"
     keys: list[str] = []
     for hour in hours:
         prefix = f"{bucket}/{product}/{day:%Y/%m/%d}/{hour:02d}"
@@ -271,8 +273,18 @@ def list_himawari_keys(
         except FileNotFoundError:
             log.warning("no data at %s", prefix)
             continue
-        keys.extend(k for k in listing if band in k and k.endswith((".nc", ".nc4")))
+        keys.extend(k for k in listing if token in k and k.endswith((".nc", ".nc4")))
     return sorted(keys)
+
+
+def group_isatss_keys_by_slot(keys: Sequence[str]) -> dict[str, list[str]]:
+    """Group tile keys by their `HHMM` slot directory, preserving order."""
+    slots: dict[str, list[str]] = {}
+    for key in keys:
+        parts = key.split("/")
+        slot = parts[-2] if len(parts) >= 2 else ""
+        slots.setdefault(slot, []).append(key)
+    return slots
 
 
 def fetch_himawari_b13_aws(
@@ -282,20 +294,37 @@ def fetch_himawari_b13_aws(
     hours: Iterable[int],
     bucket: str = HIMAWARI_BUCKETS["himawari8"],
     product: str = HIMAWARI_DEFAULT_PRODUCT,
-    band: str = "B13",
+    channel: int = 13,
     max_files: int | None = None,
+    max_slots: int | None = None,
     every: int = 1,
     progress: bool = False,
     fs: Any | None = None,
 ) -> DownloadStats:
-    """Download one day's AHI Band 13 files from the anonymous NOAA AWS mirror."""
-    fs = fs or _filesystem()
-    keys = list_himawari_keys(day, hours, bucket=bucket, product=product, band=band, fs=fs)
-    keys = keys[::every]
-    if max_files is not None:
-        keys = keys[:max_files]
+    """Download ISatSS Band-13 tiles from the anonymous NOAA AWS mirror.
 
-    stats = download_keys(fs, keys, dest, progress=progress, label=f"Himawari {day}")
+    `every` and `max_slots` subsample whole 10-minute SLOTS rather than individual
+    files: a slot's 76 tiles are one frame, so dropping tiles at random would leave
+    every frame with holes instead of giving fewer complete frames.
+    """
+    fs = fs or _filesystem()
+    keys = list_himawari_keys(
+        day, hours, bucket=bucket, product=product, channel=channel, fs=fs
+    )
+    slots = group_isatss_keys_by_slot(keys)
+    ordered = sorted(slots)[::every]
+    if max_slots is not None:
+        ordered = ordered[:max_slots]
+
+    selected = [k for slot in ordered for k in slots[slot]]
+    if max_files is not None:
+        selected = selected[:max_files]
+    log.info(
+        "%s %s: %d slot(s) selected of %d, %d tile(s) to fetch",
+        product, day, len(ordered), len(slots), len(selected),
+    )
+
+    stats = download_keys(fs, selected, dest, progress=progress, label=f"Himawari {day}")
     stats.log_summary(f"Himawari AWS {day}")
     return stats
 

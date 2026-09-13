@@ -2,7 +2,8 @@ data:
   sensor: insat3dr
   raw_root: data/raw/insat_rapidscan
   cache_root: cache/insat_rapidscan
-  cadence_minutes: 4
+  # Native rapid-scan cadence is 4 min 30 s, not a clean 4 minutes (verified).
+  cadence_minutes: 4.5
   tolerance_minutes: 1
   grid:
     lat_min: -10.0

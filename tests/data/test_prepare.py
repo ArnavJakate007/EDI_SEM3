@@ -151,3 +151,67 @@ def test_parallel_and_serial_paths_agree(tmp_path, raw_rows, workers):
     stats = run_prepare(_tasks(raw_rows, cache), workers=workers)
     assert stats.written == 3
     assert len(sorted(cache.rglob("*.npy"))) == 3
+
+
+# ------------------------------------------------ renormalisation at cache time
+
+
+def _identity_shift_map(shift_k: float):
+    """A QuantileMap that simply adds `shift_k` Kelvin, for an exact assertion."""
+    from sattsr.data.normalize import QuantileMap
+
+    src = np.linspace(150.0, 350.0, 64).astype(np.float32)
+    return QuantileMap(
+        sensor="himawari8", reference="goes19",
+        quantiles=np.linspace(0.0, 1.0, 64),
+        source_values=src,
+        target_values=(src + shift_k).astype(np.float32),
+    )
+
+
+def test_no_renorm_leaves_the_cached_array_untouched(tmp_path, raw_rows):
+    cache = tmp_path / "cache" / "goes19"
+    run_prepare(_tasks(raw_rows[:1], cache))
+    baseline = np.load(next(cache.rglob("*.npy")))
+    assert np.isfinite(baseline).any()
+
+
+def test_renorm_is_applied_before_writing_the_cache(tmp_path, raw_rows):
+    """Renormalisation is baked into the .npy, not applied per batch later."""
+    plain = tmp_path / "cache" / "plain"
+    shifted = tmp_path / "cache" / "shifted"
+
+    run_prepare(build_tasks(raw_rows[:1], cache_root=plain, grid_config=GRID))
+    run_prepare(build_tasks(raw_rows[:1], cache_root=shifted, grid_config=GRID,
+                            renorm=_identity_shift_map(5.0)))
+
+    a = np.load(next(plain.rglob("*.npy")))
+    b = np.load(next(shifted.rglob("*.npy")))
+    both = np.isfinite(a) & np.isfinite(b)
+    assert both.any()
+    np.testing.assert_allclose(b[both], a[both] + 5.0, atol=0.2)
+
+
+def test_renorm_preserves_the_invalid_mask(tmp_path, raw_rows):
+    """A renorm map must not turn NaN into a number or vice versa."""
+    plain = tmp_path / "cache" / "plain"
+    shifted = tmp_path / "cache" / "shifted"
+    run_prepare(build_tasks(raw_rows[:1], cache_root=plain, grid_config=GRID))
+    run_prepare(build_tasks(raw_rows[:1], cache_root=shifted, grid_config=GRID,
+                            renorm=_identity_shift_map(5.0)))
+
+    a = np.load(next(plain.rglob("*.npy")))
+    b = np.load(next(shifted.rglob("*.npy")))
+    np.testing.assert_array_equal(np.isfinite(a), np.isfinite(b))
+
+
+def test_renorm_survives_the_process_pool(tmp_path, raw_rows):
+    """PrepareTask carries the map across a spawn boundary, so it must pickle."""
+    cache = tmp_path / "cache" / "parallel"
+    stats = run_prepare(
+        build_tasks(raw_rows, cache_root=cache, grid_config=GRID,
+                    renorm=_identity_shift_map(3.0)),
+        workers=2,
+    )
+    assert stats.written == 3
+    assert stats.failed == 0

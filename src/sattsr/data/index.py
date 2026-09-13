@@ -155,3 +155,34 @@ def load_or_scan_index(cache_root: str | Path, sensor: str) -> list[FrameRef]:
             return refs
         log.warning("%s has no %s entries; falling back to a cache scan", index_path, sensor)
     return scan_cache(cache_root, sensor)
+
+
+def find_orphan_cache_files(cache_root: str | Path, sensor: str) -> list[Path]:
+    """Cached `.npy` files under `cache_root` that `index.json` does not reference.
+
+    Orphans are how the nested `cache/<sensor>/<sensor>/` path bug stayed invisible:
+    the index was correct, so every consumer that went through it behaved, while
+    anything that walked the tree directly (`fit_renorm`'s sampling, for one) silently
+    pooled dead frames. Returns an empty list when there is no index to compare with.
+    """
+    root = Path(cache_root)
+    index_path = root / "index.json"
+    if not index_path.exists():
+        return []
+
+    indexed = {p.resolve() for p in (r.path for r in load_index(index_path))}
+    on_disk = {p.resolve() for p in root.rglob("*.npy")}
+    return sorted(on_disk - indexed)
+
+
+def assert_cache_matches_index(cache_root: str | Path, sensor: str) -> None:
+    """Raise if the cache tree holds frames the index does not know about."""
+    orphans = find_orphan_cache_files(cache_root, sensor)
+    if orphans:
+        sample = ", ".join(p.name for p in orphans[:5])
+        raise ValueError(
+            f"{len(orphans)} cached file(s) under {cache_root} are not in index.json "
+            f"(first: {sample}). These are stale -- most likely left by an earlier "
+            f"path layout. Delete them, or re-run scripts/preprocess.py --force, "
+            f"before sampling from this cache."
+        )

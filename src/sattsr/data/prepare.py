@@ -25,6 +25,7 @@ import numpy as np
 
 from sattsr.config import GridConfig
 from sattsr.data.index import FrameRef, cache_path_for
+from sattsr.data.normalize import QuantileMap
 from sattsr.geo.grid import TargetGrid
 from sattsr.geo.resample import coverage_fraction
 from sattsr.io.manifest import ManifestRow
@@ -44,6 +45,10 @@ class PrepareTask:
     grid_config: GridConfig
     min_coverage: float
     force: bool
+    #: Cross-sensor radiometric map applied before caching. None for the reference
+    #: sensor, or when no registry has been fitted. Frozen dataclass of numpy arrays,
+    #: so it pickles cleanly across the process pool.
+    renorm: QuantileMap | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,7 @@ def build_tasks(
     grid_config: GridConfig,
     min_coverage: float = 0.5,
     force: bool = False,
+    renorm: QuantileMap | None = None,
 ) -> list[PrepareTask]:
     """Turn manifest rows into cache-writing tasks."""
     tasks: list[PrepareTask] = []
@@ -102,6 +108,7 @@ def build_tasks(
                 grid_config=grid_config,
                 min_coverage=float(min_coverage),
                 force=bool(force),
+                renorm=renorm,
             )
         )
     return tasks
@@ -127,9 +134,17 @@ def prepare_one(task: PrepareTask) -> PrepareOutcome:
     if coverage < task.min_coverage:
         return PrepareOutcome(task, "low_coverage", coverage=coverage)
 
+    # Renormalisation happens HERE, at cache-write time, not per batch: the cached
+    # .npy is the pipeline's single source of truth, so a frame is stored already on
+    # the reference sensor's radiometric scale. Changing the registry therefore
+    # invalidates the cache -- rerun with --force.
+    bt = frame.bt
+    if task.renorm is not None:
+        bt = task.renorm.apply(bt)
+
     try:
         task.dest.parent.mkdir(parents=True, exist_ok=True)
-        np.save(task.dest, np.asarray(frame.bt, dtype=np.float32))
+        np.save(task.dest, np.asarray(bt, dtype=np.float32))
     except OSError as exc:
         return PrepareOutcome(task, "failed", coverage=coverage, error=str(exc))
 
