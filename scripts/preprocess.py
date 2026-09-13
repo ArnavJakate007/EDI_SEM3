@@ -73,10 +73,8 @@ def resolve_renorm(
         registry = RenormRegistry.load(renorm_dir)
     except FileNotFoundError:
         message = (
-            f"no renormalisation registry in {renorm_dir}. Fit one first:
-"
-            f"    python scripts/preprocess.py --sensor <reference> --renorm off
-"
+            f"no renormalisation registry in {renorm_dir}. Fit one first:\n"
+            f"    python scripts/preprocess.py --sensor <reference> --renorm off\n"
             f"    python scripts/fit_renorm.py"
         )
         if mode == "require":
@@ -95,8 +93,7 @@ def resolve_renorm(
     if renorm is None:
         message = (
             f"registry in {renorm_dir} has no map for {sensor!r} "
-            f"(it has: {registry.sensors or 'none'}). Fit one with:
-"
+            f"(it has: {registry.sensors or 'none'}). Fit one with:\n"
             f"    python scripts/fit_renorm.py --sensors {sensor}"
         )
         if mode == "require":

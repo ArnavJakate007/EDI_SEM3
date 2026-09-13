@@ -30,14 +30,37 @@ log = logging.getLogger("train_goes")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/goes19.yaml")
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--tile-size", type=int, default=None)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--skip-prepare", action="store_true")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--config", default="configs/goes19.yaml",
+        help="Sensor config YAML (default: configs/goes19.yaml).",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=None,
+        help="Override the config's epoch count.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=None,
+        help="Override the config's batch size.",
+    )
+    parser.add_argument(
+        "--tile-size", type=int, default=None,
+        help="Override the training tile edge length in pixels. Must be a multiple "
+             "of the model's coarsest scale.",
+    )
+    parser.add_argument(
+        "--device", default="auto", help="auto (default), cpu, or cuda.",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=4,
+        help="DataLoader worker processes (default 4).",
+    )
+    parser.add_argument(
+        "--skip-prepare", action="store_true",
+        help="Assume the cache is already built and go straight to training.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(

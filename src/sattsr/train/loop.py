@@ -37,6 +37,10 @@ class EpochResult:
     loss: float
     components: dict[str, float] = field(default_factory=dict)
     psnr: float = float("nan")
+    #: Optimizer steps that actually updated weights, and batches attempted. Equal
+    #: except when the AMP scaler skips inf/nan gradients.
+    applied_steps: int = 0
+    batches: int = 0
 
 
 def _batch_psnr(pred: Tensor, target: Tensor, mask: Tensor | None = None) -> float:
@@ -67,6 +71,8 @@ def _run_epoch(
     totals: dict[str, float] = defaultdict(float)
     psnr_sum = 0.0
     seen = 0
+    batches = 0
+    applied = 0          # optimizer steps that actually changed the weights
 
     for batch in loader:
         # Mixed-sensor batches carry per-sample `sensor`/`scan_mode` strings alongside
@@ -84,17 +90,26 @@ def _run_epoch(
 
             if training:
                 assert optimizer is not None
+                batches += 1
                 optimizer.zero_grad(set_to_none=True)
                 if scaler is not None:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    before = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
+                    # GradScaler silently skips a step whose gradients are inf/nan, and
+                    # signals it by lowering the scale. If that happens on every batch
+                    # the model never updates while the losses still look plausible --
+                    # a 40-epoch run once finished with bit-identical val loss and a
+                    # single applied update. Count them so it cannot pass unnoticed.
+                    applied += int(scaler.get_scale() >= before)
                 else:
                     loss.backward()
                     nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                     optimizer.step()
+                    applied += 1
 
         for key, value in parts.items():
             totals[key] += value * n
@@ -103,10 +118,29 @@ def _run_epoch(
         )
         seen += n
 
+    if training and batches:
+        if applied == 0:
+            log.error(
+                "NO optimizer step was applied in %d batch(es): every gradient was "
+                "inf/nan and the scaler skipped them all. The model did NOT train. "
+                "Check for a loss term that is numerically unsafe in float16, or "
+                "disable AMP (train.amp: false).",
+                batches,
+            )
+        elif applied < batches * 0.5:
+            log.warning(
+                "only %d of %d optimizer steps applied; the rest had inf/nan "
+                "gradients and were skipped by the AMP scaler",
+                applied, batches,
+            )
+
     if seen == 0:
         return EpochResult(loss=float("nan"), components={}, psnr=float("nan"))
     components = {k: v / seen for k, v in totals.items()}
-    return EpochResult(loss=components["total"], components=components, psnr=psnr_sum / seen)
+    return EpochResult(
+        loss=components["total"], components=components, psnr=psnr_sum / seen,
+        applied_steps=applied, batches=batches,
+    )
 
 
 def train_one_epoch(

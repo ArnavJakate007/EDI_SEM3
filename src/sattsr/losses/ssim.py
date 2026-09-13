@@ -24,23 +24,40 @@ class SSIM(nn.Module):
         self.register_buffer("window", _gaussian_window(window_size, sigma), persistent=False)
 
     def forward(self, a: Tensor, b: Tensor) -> Tensor:
-        """Scalar mean SSIM between two (N, 1, H, W) tensors."""
-        window = self.window.to(dtype=a.dtype, device=a.device)
-        pad = self.window_size // 2
+        """Scalar mean SSIM between two (N, 1, H, W) tensors.
 
-        mu_a = F.conv2d(a, window, padding=pad)
-        mu_b = F.conv2d(b, window, padding=pad)
-        mu_a2, mu_b2, mu_ab = mu_a * mu_a, mu_b * mu_b, mu_a * mu_b
+        Computed in float32 with autocast disabled, ALWAYS. The variance terms are
+        formed as `E[x^2] - E[x]^2`, and thermal-IR imagery is smooth enough that those
+        two terms are nearly equal over most of a window. In float16 that subtraction
+        is catastrophic cancellation: the result is noise around zero, sometimes
+        negative, which drives the SSIM denominator towards zero and makes the backward
+        pass produce NaN.
 
-        sigma_a2 = F.conv2d(a * a, window, padding=pad) - mu_a2
-        sigma_b2 = F.conv2d(b * b, window, padding=pad) - mu_b2
-        sigma_ab = F.conv2d(a * b, window, padding=pad) - mu_ab
+        That failure is silent and total. Under AMP it poisoned the gradients of every
+        parameter, so GradScaler skipped every optimizer step and a 40-epoch run
+        finished with bit-identical validation loss and exactly one applied update.
+        """
+        with torch.autocast(device_type=a.device.type, enabled=False):
+            a = a.float()
+            b = b.float()
+            window = self.window.to(dtype=a.dtype, device=a.device)
+            pad = self.window_size // 2
 
-        c1 = (0.01 * self.data_range) ** 2
-        c2 = (0.03 * self.data_range) ** 2
-        num = (2 * mu_ab + c1) * (2 * sigma_ab + c2)
-        den = (mu_a2 + mu_b2 + c1) * (sigma_a2 + sigma_b2 + c2)
-        return (num / den).mean()
+            mu_a = F.conv2d(a, window, padding=pad)
+            mu_b = F.conv2d(b, window, padding=pad)
+            mu_a2, mu_b2, mu_ab = mu_a * mu_a, mu_b * mu_b, mu_a * mu_b
+
+            # Clamped: cancellation can still leave a tiny negative variance even in
+            # float32, and a negative denominator term is not physically meaningful.
+            sigma_a2 = (F.conv2d(a * a, window, padding=pad) - mu_a2).clamp_min(0.0)
+            sigma_b2 = (F.conv2d(b * b, window, padding=pad) - mu_b2).clamp_min(0.0)
+            sigma_ab = F.conv2d(a * b, window, padding=pad) - mu_ab
+
+            c1 = (0.01 * self.data_range) ** 2
+            c2 = (0.03 * self.data_range) ** 2
+            num = (2 * mu_ab + c1) * (2 * sigma_ab + c2)
+            den = (mu_a2 + mu_b2 + c1) * (sigma_a2 + sigma_b2 + c2)
+            return (num / den).mean()
 
 
 class SSIMLoss(nn.Module):

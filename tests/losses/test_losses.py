@@ -300,3 +300,73 @@ def test_every_component_is_finite_and_non_negative():
             assert value == value, f"{name} is NaN"
             assert abs(value) != float("inf"), f"{name} is infinite"
             assert value >= 0.0, f"{name} is negative ({value})"
+
+
+# ------------------------------------------- mixed-precision numerical safety
+
+
+def test_ssim_computes_in_float32_even_for_half_inputs():
+    """SSIM must not evaluate its variance terms in float16."""
+    a = torch.rand(1, 1, 32, 32, dtype=torch.float16)
+    b = torch.rand(1, 1, 32, 32, dtype=torch.float16)
+    assert SSIM()(a, b).dtype == torch.float32
+    assert MSSSIM()(a, b).dtype == torch.float32
+
+
+def test_ssim_gradient_is_finite_on_a_nearly_constant_half_input():
+    """The exact failure mode that silently froze a 40-epoch AMP run.
+
+    Thermal-IR imagery is smooth, so E[x^2] and E[x]^2 are nearly equal over a window.
+    Subtracting them in float16 is catastrophic cancellation, and the resulting
+    near-zero (or negative) denominator makes the backward pass emit NaN. Those NaN
+    gradients made GradScaler skip every optimizer step, so the model never updated
+    while train/val loss still looked plausible.
+    """
+    base = torch.full((1, 1, 32, 32), 0.5)
+    a = (base + 1e-4 * torch.randn(1, 1, 32, 32)).half().float().requires_grad_(True)
+    target = (base + 1e-4 * torch.randn(1, 1, 32, 32)).half().float()
+
+    loss = SSIMLoss(data_range=1.0)(a, target)
+    loss.backward()
+    assert torch.isfinite(loss), "SSIM went non-finite on a smooth input"
+    assert a.grad is not None and torch.isfinite(a.grad).all(), "SSIM produced NaN grads"
+
+
+def test_ssim_of_a_perfectly_constant_pair_is_finite():
+    """Zero variance on both sides is the worst case for the denominator."""
+    a = torch.full((1, 1, 24, 24), 0.3, requires_grad=True)
+    b = torch.full((1, 1, 24, 24), 0.3)
+    value = SSIM()(a, b)
+    value.backward()
+    assert torch.isfinite(value) and value > 0.99
+    assert torch.isfinite(a.grad).all()
+
+
+def test_composite_loss_gradients_are_finite_under_autocast():
+    """End-to-end guard: every parameter must receive a usable gradient under AMP."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    from sattsr.config import ModelConfig
+    from sattsr.models.interpolator import build_model
+
+    torch.manual_seed(0)
+    model = build_model(
+        ModelConfig(base_channels=16, scales=[2, 1], flow_channels=16,
+                    flow_radius=2, flow_iters=2)
+    ).to(device)
+    # A smooth, low-contrast scene -- the condition that triggers the cancellation.
+    i0 = (0.5 + 0.01 * torch.randn(2, 1, 64, 64)).clamp(0, 1).to(device)
+    i2 = (0.5 + 0.01 * torch.randn(2, 1, 64, 64)).clamp(0, 1).to(device)
+    batch = {
+        "i0": i0, "i2": i2, "i1": 0.5 * (i0 + i2),
+        "valid": torch.ones(2, 1, 64, 64, device=device),
+        "t": torch.tensor([0.5, 0.5], device=device),
+    }
+
+    with torch.autocast(device_type=device, enabled=True):
+        out = model(batch["i0"], batch["i2"], batch["t"])
+        loss, _ = CompositeLoss(LossConfig())(out, batch)
+    loss.float().backward()
+
+    bad = [n for n, p in model.named_parameters()
+           if p.grad is not None and not torch.isfinite(p.grad).all()]
+    assert not bad, f"{len(bad)} parameter(s) got non-finite gradients under autocast: {bad[:5]}"

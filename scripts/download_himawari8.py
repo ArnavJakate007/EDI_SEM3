@@ -26,7 +26,7 @@ Two archives carry AHI Band 13, and they are NOT interchangeable for this repo:
 
 Default is aws because it needs no credentials and the reader handles ISatSS directly.
 
-    python scripts/download_himawari8.py --start 2019-07-01 --end 2019-07-01 --hours 1-2 --max-slots 3
+    python scripts/download_himawari8.py --start 2022-01-13 --end 2022-01-13 \n        --hours 0-3 --jobs 12
     python scripts/download_himawari8.py --source jaxa --start 2026-02-10 --end 2026-02-10
 """
 

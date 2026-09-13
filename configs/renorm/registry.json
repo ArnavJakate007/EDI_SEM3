@@ -2,5 +2,13 @@
   "reference": "goes19",
   "sensors": [
     "himawari8"
-  ]
+  ],
+  "scenes_per_sensor": {
+    "himawari8": [
+      "clear_warm",
+      "convective",
+      "stratiform"
+    ]
+  },
+  "written_at": "2026-09-13T06:39:49+00:00"
 }

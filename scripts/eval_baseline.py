@@ -36,7 +36,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "train.yaml")
+    parser.add_argument(
+        "--config", type=Path, default=REPO_ROOT / "configs" / "train.yaml",
+        help="Training plan YAML supplying the split sources and loader settings.",
+    )
     parser.add_argument(
         "--split", default="val",
         help="Which loader to score: train, val, finetune, insat_rapid_scan_eval.",
