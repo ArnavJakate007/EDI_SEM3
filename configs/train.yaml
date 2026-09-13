@@ -52,7 +52,10 @@ train:
   batch_size: 8
   lr: 2.0e-4
   weight_decay: 1.0e-5
-  epochs: 40
+  # 60 rather than the previous round's 40: the dataset is ~4x larger
+  # (1721 train triplets vs 413), so more passes are justified before the
+  # cosine schedule anneals out. Revisit from the val_psnr curve.
+  epochs: 60
   amp: true
   num_workers: 0
   seed: 1337
