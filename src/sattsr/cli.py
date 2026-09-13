@@ -12,7 +12,13 @@ from torch.utils.data import DataLoader
 
 from sattsr.config import Config, load_config
 from sattsr.data.dataset import TripletDataset
-from sattsr.data.index import FrameRef, build_index, prepare_cache, save_index
+from sattsr.data.index import (
+    FrameRef,
+    build_index,
+    load_or_scan_index,
+    prepare_cache,
+    save_index,
+)
 from sattsr.data.prune import prune_verified_raw, subsample_index
 from sattsr.data.triplets import build_triplets, split_triplets
 from sattsr.eval.report import evaluate_triplets, write_report
@@ -40,7 +46,23 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+log = logging.getLogger(__name__)
+
+
 def _cached_refs(config: Config, *, progress: bool = False) -> list[FrameRef]:
+    """Frame references for this sensor, preferring the cache over the raw tree.
+
+    The cache is consulted first because `--delete-raw-after-cache` reclaims raw
+    granules as soon as their frames are cached: on a disk-constrained machine the
+    cache is usually the only copy left, and enumerating from raw would report an
+    empty dataset for a cache holding thousands of frames. Raw is still scanned (and
+    anything missing regridded) when the cache has nothing, which is the first-run case.
+    """
+    cached = load_or_scan_index(config.data.cache_root, config.data.sensor)
+    if cached:
+        log.info("using %d cached frame(s) from %s", len(cached), config.data.cache_root)
+        return cached
+
     reader = get_reader(config.data.sensor)
     grid = TargetGrid.from_config(config.data.grid)
     return prepare_cache(
@@ -188,11 +210,18 @@ def infer(
     factor: int = typer.Option(2, "--factor", help="2 halves the interval, 4 quarters it."),
     device: str = DeviceOpt,
     limit: int | None = typer.Option(None, "--limit"),
+    from_cache: bool = typer.Option(
+        False, "--from-cache",
+        help="Read regridded frames from the .npy cache instead of raw granules. "
+             "Required once --delete-raw-after-cache has reclaimed the raw files, "
+             "and faster regardless since no reader or regridding is needed.",
+    ),
 ) -> None:
     """Densify a series of observations and write a flagged NetCDF product."""
     cfg = load_config(config)
     manifest = run_inference(cfg, input_dir=input_dir, output_dir=out, checkpoint=checkpoint,
-                             factor=factor, device=resolve_device(device), limit=limit)
+                             factor=factor, device=resolve_device(device), limit=limit,
+                             from_cache=from_cache)
     typer.echo(
         f"{manifest.n_original} observed + {manifest.n_synthetic} synthesized frames "
         f"at {manifest.output_cadence_minutes} min -> {out}"

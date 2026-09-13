@@ -114,3 +114,65 @@ def test_limit_truncates_the_input_series(tmp_path):
         checkpoint=_checkpoint(tmp_path), factor=2, device=torch.device("cpu"), limit=3,
     )
     assert manifest.n_original == 3
+
+
+# ------------------------------------------------- cache-sourced inference
+
+
+def _write_cache_frames(root, n=4, size=32):
+    """A small regridded .npy cache with an index, as preprocess.py leaves behind."""
+    from datetime import datetime, timedelta, timezone
+
+    import numpy as np
+
+    from sattsr.data.index import FrameRef, save_index
+
+    t0 = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
+    refs = []
+    for i in range(n):
+        ts = t0 + timedelta(minutes=10 * i)
+        dest = root / ts.strftime("%Y%m%d") / f"{ts.strftime('%H%M%S')}.npy"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        yy, xx = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
+        np.save(dest, (250.0 + 0.3 * ((xx + i) % size) + 0.2 * yy).astype(np.float32))
+        refs.append(FrameRef(ts, dest, "goes19"))
+    save_index(refs, root / "index.json")
+    return refs
+
+
+def test_frames_from_cache_reads_regridded_frames(tmp_path):
+    """The cache is often the only copy left once raw has been reclaimed."""
+    import numpy as np
+
+    from sattsr.infer.pipeline import frames_from_cache
+
+    refs = _write_cache_frames(tmp_path / "cache", n=5)
+    frames = frames_from_cache(tmp_path / "cache", "goes19")
+
+    assert len(frames) == 5
+    assert [f.timestamp for f in frames] == [r.timestamp for r in refs]
+    assert all(f.sensor == "goes19" for f in frames)
+    assert frames[0].bt.dtype == np.float32
+    assert frames[0].bt.shape == (32, 32)
+
+
+def test_frames_from_cache_honours_limit(tmp_path):
+    from sattsr.infer.pipeline import frames_from_cache
+
+    _write_cache_frames(tmp_path / "cache", n=6)
+    assert len(frames_from_cache(tmp_path / "cache", "goes19", limit=3)) == 3
+
+
+def test_frames_from_cache_skips_an_unreadable_frame(tmp_path):
+    from sattsr.infer.pipeline import frames_from_cache
+
+    refs = _write_cache_frames(tmp_path / "cache", n=4)
+    refs[1].path.write_text("not a npy", encoding="utf-8")
+    assert len(frames_from_cache(tmp_path / "cache", "goes19")) == 3
+
+
+def test_frames_from_cache_is_empty_for_an_empty_cache(tmp_path):
+    from sattsr.infer.pipeline import frames_from_cache
+
+    (tmp_path / "cache").mkdir()
+    assert frames_from_cache(tmp_path / "cache", "goes19") == []

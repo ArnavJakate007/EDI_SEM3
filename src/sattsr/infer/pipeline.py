@@ -1,4 +1,11 @@
-"""End-to-end inference: raw sensor files in, flagged NetCDF and a run manifest out."""
+"""End-to-end inference: sensor frames in, flagged NetCDF and a run manifest out.
+
+Input can come from raw sensor files, or from the regridded `.npy` cache. The cache
+path matters because `--delete-raw-after-cache` removes raw files as soon as their
+frames are cached, so on a disk-constrained machine the cache is usually the only
+copy left -- and it is the faster path anyway, since the frames are already on the
+target grid and need no reader or regridding.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from sattsr import __version__
 from sattsr.config import Config
-from sattsr.data.index import build_index
+from sattsr.data.index import build_index, load_or_scan_index
 from sattsr.geo.grid import TargetGrid
 from sattsr.infer.recursive import interpolate_sequence
 from sattsr.io.base import Frame
@@ -70,6 +78,32 @@ def read_manifest(run_dir: str | Path) -> RunManifest:
     return RunManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
+def frames_from_cache(
+    cache_root: str | Path, sensor: str, *, limit: int | None = None
+) -> list[Frame]:
+    """Load already-regridded frames straight from the `.npy` cache.
+
+    The cached array is the regridded field itself, so this skips the reader and the
+    resampling entirely. It is also the only option once the raw granules have been
+    reclaimed by --delete-raw-after-cache.
+    """
+    refs = load_or_scan_index(cache_root, sensor)
+    if limit is not None:
+        refs = refs[:limit]
+
+    frames: list[Frame] = []
+    for ref in refs:
+        try:
+            bt = np.load(ref.path).astype(np.float32, copy=False)
+        except (OSError, ValueError) as exc:
+            log.warning("skipping unreadable cache frame %s: %s", ref.path.name, exc)
+            continue
+        frames.append(
+            Frame(timestamp=ref.timestamp, bt=bt, sensor=sensor, source_path=ref.path)
+        )
+    return frames
+
+
 def run_inference(
     config: Config,
     *,
@@ -80,22 +114,32 @@ def run_inference(
     device: torch.device,
     limit: int | None = None,
     run_id: str | None = None,
+    from_cache: bool = False,
 ) -> RunManifest:
-    """Read a series of sensor files, densify it, and write a flagged NetCDF product."""
+    """Read a series of sensor frames, densify it, and write a flagged NetCDF product.
+
+    `from_cache=True` sources the regridded `.npy` cache instead of raw granules.
+    """
     run_dir = Path(output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    reader = get_reader(config.data.sensor)
     grid = TargetGrid.from_config(config.data.grid)
 
-    refs = build_index(reader, input_dir)
-    if limit is not None:
-        refs = refs[:limit]
-    if len(refs) < 2:
-        raise ValueError(f"need at least two input frames in {input_dir}, found {len(refs)}")
+    if from_cache:
+        originals = frames_from_cache(input_dir, config.data.sensor, limit=limit)
+        source_desc = f"cache {input_dir}"
+    else:
+        reader = get_reader(config.data.sensor)
+        refs = build_index(reader, input_dir)
+        if limit is not None:
+            refs = refs[:limit]
+        originals = [reader.read(ref.path, grid) for ref in refs]
+        source_desc = f"raw {input_dir}"
 
-    originals: list[Frame] = [reader.read(ref.path, grid) for ref in refs]
-    log.info("read %d frames from %s", len(originals), input_dir)
+    if len(originals) < 2:
+        raise ValueError(
+            f"need at least two input frames in {source_desc}, found {len(originals)}"
+        )
+    log.info("read %d frames from %s", len(originals), source_desc)
 
     model = build_model(config.model)
     load_checkpoint(checkpoint, model, map_location=str(device))
