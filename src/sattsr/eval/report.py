@@ -174,6 +174,14 @@ def _sanitise(node: Any) -> Any:
     return node
 
 
+#: Metrics the model-vs-Farneback verdict is computed for. The answer is not the
+#: same across them -- PSNR and MSE reward pixel-exactness, which a flow-warped copy
+#: of a real frame is very good at, while FSIM weights phase/gradient structure, which
+#: is what actually degrades when a warp tears a cloud field. Reporting only one would
+#: pick the conclusion.
+VERDICT_METRICS = ("psnr", "ssim", "mse", "fsim")
+
+
 def head_to_head(
     summary: dict[str, Any], *, metric: str = "psnr"
 ) -> dict[str, Any]:
@@ -232,6 +240,9 @@ def write_report(
         "category_disclaimer": CATEGORY_DISCLAIMER,
         "summary": _sanitise(aggregate(results)),
         "head_to_head": _sanitise(head_to_head(aggregate(results))),
+        "head_to_head_by_metric": _sanitise(
+            {m: head_to_head(aggregate(results), metric=m) for m in VERDICT_METRICS}
+        ),
         "samples": [
             {
                 "timestamp": r.timestamp.astimezone(timezone.utc).isoformat(),

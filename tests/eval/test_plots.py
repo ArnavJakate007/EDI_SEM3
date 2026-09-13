@@ -162,3 +162,31 @@ def test_charts_escape_category_names(tmp_path):
     nasty["by_category"]["<script>"] = {"model": {"psnr": 1.0}, "farneback": {"psnr": 1.0}}
     svg = margin_chart(nasty)
     assert "<script>" not in svg and "&lt;script&gt;" in svg
+
+
+def test_the_verdict_can_differ_between_metrics():
+    """PSNR rewards pixel-exactness; FSIM weights structure. They can disagree, and
+    reporting only one would pick the conclusion."""
+    from sattsr.eval.report import VERDICT_METRICS, head_to_head
+
+    s = _summary(by_category={
+        "convective": {
+            # Farneback wins on PSNR, the model wins on FSIM -- the real pattern
+            # observed on this archive.
+            "model": {"psnr": 38.2, "fsim": 0.9478},
+            "farneback": {"psnr": 38.6, "fsim": 0.9456},
+            "linear": {"psnr": 33.3, "fsim": 0.9051},
+        },
+    }, counts={"convective": 99})
+
+    assert head_to_head(s, metric="psnr")["categories_won"] == []
+    assert head_to_head(s, metric="fsim")["categories_won"] == ["convective"]
+    assert "fsim" in VERDICT_METRICS and "psnr" in VERDICT_METRICS
+
+
+def test_every_verdict_metric_is_reported_for_a_written_report(tmp_path):
+    from sattsr.eval.report import VERDICT_METRICS, head_to_head
+
+    verdicts = {m: head_to_head(_summary(), metric=m) for m in VERDICT_METRICS}
+    assert set(verdicts) == set(VERDICT_METRICS)
+    assert all("by_category" in v for v in verdicts.values())

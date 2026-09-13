@@ -117,6 +117,11 @@ def create_app(runs_dir: str | Path, *, static_dir: Path | None = None) -> FastA
         path = _require_file(run_dir / "report.json", "no report for this run")
         report = json.loads(path.read_text(encoding="utf-8"))
         verdict = report.get("head_to_head")
+        if verdict is not None and "head_to_head_by_metric" in report:
+            # The verdict is metric-dependent -- the model can lose on PSNR while
+            # winning on FSIM -- so serve every metric, not just the default.
+            verdict = dict(verdict)
+            verdict["by_metric"] = report["head_to_head_by_metric"]
         if verdict is None:
             raise HTTPException(
                 status_code=404,
