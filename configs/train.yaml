@@ -52,10 +52,11 @@ train:
   batch_size: 8
   lr: 2.0e-4
   weight_decay: 1.0e-5
-  # 60 rather than the previous round's 40: the dataset is ~4x larger
-  # (1721 train triplets vs 413), so more passes are justified before the
-  # cosine schedule anneals out. Revisit from the val_psnr curve.
-  epochs: 60
+  # 45, down from 60. The dataset grew to 2950 train triplets and the balanced
+  # sampler now yields 485 batches/epoch rather than 311, so each epoch carries 56%
+  # more optimiser steps. The previous run's val_psnr was already flat from ~epoch 45
+  # of 60, so the same convergence arrives in fewer passes. Set from the curve.
+  epochs: 45
   amp: true
   num_workers: 0
   seed: 1337
