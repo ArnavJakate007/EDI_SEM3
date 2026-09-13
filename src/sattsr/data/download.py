@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -136,6 +137,31 @@ def _filesystem():
     return s3fs.S3FileSystem(anon=True)
 
 
+def _fetch_one(
+    fs: Any, key: str, out_dir: Path, *, attempts: int, verify_size: bool
+) -> tuple[str, Path | None, str]:
+    """Fetch one key. Returns (status, local_path, error) -- never raises."""
+    local = out_dir / Path(key).name
+
+    # The size check costs an extra round trip per file, and it can only tell us
+    # anything when there is already a local file to compare against. Skipping it for
+    # files we do not have roughly halves the request count on a fresh fetch, which
+    # dominates the wall clock on a latency-bound tiled product.
+    remote_size = _remote_size(fs, key) if (verify_size and local.exists()) else None
+
+    if not should_download(local, remote_size):
+        return "skipped", local, ""
+    try:
+        with_retries(
+            lambda: fs.get(key, str(local)),
+            attempts=attempts,
+            description=f"fetch {Path(key).name}",
+        )
+    except TRANSIENT_ERRORS as exc:
+        return "failed", None, str(exc)
+    return "downloaded", local, ""
+
+
 def download_keys(
     fs: Any,
     keys: Sequence[str],
@@ -145,46 +171,64 @@ def download_keys(
     label: str = "download",
     attempts: int = 3,
     verify_size: bool = True,
+    jobs: int = 1,
 ) -> DownloadStats:
     """Fetch every key into `out_dir`, skipping what is already complete.
 
     Individual failures are counted and logged rather than aborting the batch --
     partial archive availability is the norm and one missing hour should not sink
     an overnight fetch.
+
+    `jobs > 1` fetches concurrently with THREADS, not processes: this workload is
+    latency-bound, not CPU-bound (a Himawari ISatSS tile is ~0.35 MB but each request
+    costs well over a second of round trip), so the GIL is irrelevant and threads
+    avoid re-creating an S3 session per worker.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = DownloadStats(found=len(keys))
 
-    iterator: Iterable[str] = keys
+    bar = None
     if progress:
         from tqdm import tqdm
 
-        iterator = tqdm(list(keys), desc=label)
+        bar = tqdm(total=len(keys), desc=label)
 
-    for key in iterator:
-        local = out_dir / Path(key).name
-        remote_size = _remote_size(fs, key) if verify_size else None
-
-        if not should_download(local, remote_size):
+    def record(key: str, status: str, local: Path | None, error: str) -> None:
+        if status == "skipped":
             stats.skipped += 1
             stats.paths.append(local)
-            continue
-
-        try:
-            with_retries(
-                lambda k=key, dest=local: fs.get(k, str(dest)),
-                attempts=attempts,
-                description=f"fetch {Path(key).name}",
-            )
-        except TRANSIENT_ERRORS as exc:
-            log.error("giving up on %s: %s", key, exc)
+        elif status == "downloaded":
+            stats.downloaded += 1
+            stats.paths.append(local)
+            log.debug("downloaded %s", key)
+        else:
+            log.error("giving up on %s: %s", key, error)
             stats.failed += 1
-            continue
+        if bar is not None:
+            bar.update(1)
 
-        log.info("downloaded %s", key)
-        stats.downloaded += 1
-        stats.paths.append(local)
+    try:
+        if jobs <= 1:
+            for key in keys:
+                record(key, *_fetch_one(fs, key, out_dir,
+                                        attempts=attempts, verify_size=verify_size))
+        else:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                futures = {
+                    pool.submit(_fetch_one, fs, key, out_dir,
+                                attempts=attempts, verify_size=verify_size): key
+                    for key in keys
+                }
+                for future in as_completed(futures):
+                    key = futures[future]
+                    try:
+                        record(key, *future.result())
+                    except Exception as exc:        # noqa: BLE001 - worker crash
+                        record(key, "failed", None, f"{type(exc).__name__}: {exc}")
+    finally:
+        if bar is not None:
+            bar.close()
 
     return stats
 
@@ -226,6 +270,7 @@ def fetch_goes_c13(
     every: int = 1,
     progress: bool = False,
     fs: Any | None = None,
+    jobs: int = 1,
 ) -> list[Path]:
     """Download one day's Channel 13 full-disc files for the requested hours.
 
@@ -240,7 +285,7 @@ def fetch_goes_c13(
     if max_files is not None:
         keys = keys[:max_files]
 
-    stats = download_keys(fs, keys, dest, progress=progress, label=f"GOES {day}")
+    stats = download_keys(fs, keys, dest, progress=progress, label=f"GOES {day}", jobs=jobs)
     stats.log_summary(f"GOES-19 {day}")
     return stats.paths
 
@@ -263,6 +308,11 @@ def list_himawari_keys(
     """
     fs = fs or _filesystem()
     token = f"C{int(channel):02d}-T"
+    # The slot directories also hold OR_HR3-* (Region-3 target-sector rapid scan):
+    # a single tile per scan on a ~2.5 min cadence over a small box. It is a different
+    # product with a different footprint, so exclude it rather than paying to fetch
+    # frames the full-disk reader will then ignore.
+    family = "OR_HFD-"
     keys: list[str] = []
     for hour in hours:
         prefix = f"{bucket}/{product}/{day:%Y/%m/%d}/{hour:02d}"
@@ -273,7 +323,10 @@ def list_himawari_keys(
         except FileNotFoundError:
             log.warning("no data at %s", prefix)
             continue
-        keys.extend(k for k in listing if token in k and k.endswith((".nc", ".nc4")))
+        keys.extend(
+            k for k in listing
+            if token in k and family in k and k.endswith((".nc", ".nc4"))
+        )
     return sorted(keys)
 
 
@@ -300,6 +353,7 @@ def fetch_himawari_b13_aws(
     every: int = 1,
     progress: bool = False,
     fs: Any | None = None,
+    jobs: int = 1,
 ) -> DownloadStats:
     """Download ISatSS Band-13 tiles from the anonymous NOAA AWS mirror.
 
@@ -324,7 +378,9 @@ def fetch_himawari_b13_aws(
         product, day, len(ordered), len(slots), len(selected),
     )
 
-    stats = download_keys(fs, selected, dest, progress=progress, label=f"Himawari {day}")
+    stats = download_keys(
+        fs, selected, dest, progress=progress, label=f"Himawari {day}", jobs=jobs
+    )
     stats.log_summary(f"Himawari AWS {day}")
     return stats
 

@@ -102,6 +102,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Stop after this many files per day (quick smoke test).")
     parser.add_argument("--satellite", choices=sorted(HIMAWARI_BUCKETS), default="himawari8",
                         help="Which spacecraft's AWS bucket to use (aws source only).")
+    parser.add_argument("--jobs", type=int, default=12,
+                        help="Concurrent download threads (AWS source). A scan is 76+ "
+                             "small tiles and each request is latency-bound, so this "
+                             "is the main throughput lever. Default 12.")
     parser.add_argument("--product", default=HIMAWARI_DEFAULT_PRODUCT,
                         help=f"AWS product prefix (default: {HIMAWARI_DEFAULT_PRODUCT}).")
     return parser.parse_args(argv)
@@ -143,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 bucket=HIMAWARI_BUCKETS[args.satellite], product=args.product,
                 channel=args.channel, max_files=args.max_files,
                 max_slots=args.max_slots, every=args.every, progress=True,
+                jobs=args.jobs,
             )
         total.found += stats.found
         total.downloaded += stats.downloaded

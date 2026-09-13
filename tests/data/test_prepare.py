@@ -157,16 +157,18 @@ def test_parallel_and_serial_paths_agree(tmp_path, raw_rows, workers):
 
 
 def _identity_shift_map(shift_k: float):
-    """A QuantileMap that simply adds `shift_k` Kelvin, for an exact assertion."""
-    from sattsr.data.normalize import QuantileMap
+    """A SensorRenorm whose pooled map adds `shift_k` K, for an exact assertion."""
+    from sattsr.data.normalize import POOLED, QuantileMap, SensorRenorm
 
     src = np.linspace(150.0, 350.0, 64).astype(np.float32)
-    return QuantileMap(
+    qmap = QuantileMap(
         sensor="himawari8", reference="goes19",
         quantiles=np.linspace(0.0, 1.0, 64),
         source_values=src,
         target_values=(src + shift_k).astype(np.float32),
+        scene=POOLED,
     )
+    return SensorRenorm(sensor="himawari8", reference="goes19", maps={POOLED: qmap})
 
 
 def test_no_renorm_leaves_the_cached_array_untouched(tmp_path, raw_rows):

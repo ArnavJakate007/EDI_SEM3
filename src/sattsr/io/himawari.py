@@ -57,8 +57,14 @@ _BT_NAMES = ("tbb_13", "tbb", "brightness_temperature")
 #: digit -- BOTH spellings occur in the same archive (observed 760 files with 13
 #: digits and 64 with 14 in one hour of 2019-07-01), so accept either and ignore the
 #: fraction. Matching only 13 silently drops whole scans from the manifest.
+#: Anchored on OR_HFD- (Himawari Full Disk). The same directories also carry
+#: OR_HR3-* -- the Region-3 target-sector rapid scan: a single tile on a ~2.5 min
+#: cadence covering a small box, NOT the full disk. It satisfies every other part
+#: of this pattern, so without the anchor those frames would be mixed into the
+#: full-disk series and triplets would be built across two different footprints.
 _ISATSS_RE = re.compile(
-    r"-M\dC(?P<channel>\d{2})-T(?P<tile>\d{3})_G(?P<sat>H\d+)_s(?P<stamp>\d{13,14})_"
+    r"OR_HFD-\d{3}-B\d{2}-M\dC(?P<channel>\d{2})-T(?P<tile>\d{3})"
+    r"_G(?P<sat>H\d+)_s(?P<stamp>\d{13,14})_"
 )
 #: Creation stamp `c2020183161821`, used to prefer a reprocessed tile over the original.
 _CREATED_RE = re.compile(r"_c(?P<created>\d{13,14})\.nc$")

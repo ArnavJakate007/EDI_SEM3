@@ -24,7 +24,10 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from sattsr.config import load_config  # noqa: E402
 from sattsr.data.index import FrameRef, load_index, save_index  # noqa: E402
-from sattsr.data.normalize import RenormRegistry  # noqa: E402
+from sattsr.data.normalize import (  # noqa: E402
+    PLAUSIBLE_MEDIAN_SHIFT_K,
+    RenormRegistry,
+)
 from sattsr.data.prepare import build_tasks, run_prepare  # noqa: E402
 from sattsr.io.manifest import read_manifest  # noqa: E402
 from sattsr.io.registry import READERS  # noqa: E402
@@ -53,11 +56,14 @@ def merge_index(index_path: Path, new_refs: list[FrameRef]) -> list[FrameRef]:
     return sorted(alive, key=lambda r: (r.timestamp, str(r.path)))
 
 
-def resolve_renorm(sensor: str, mode: str, renorm_dir: Path):
-    """Pick the QuantileMap to bake into this sensor's cache, or None.
+def resolve_renorm(
+    sensor: str, mode: str, renorm_dir: Path, *, max_shift_k: float = PLAUSIBLE_MEDIAN_SHIFT_K
+):
+    """Pick the SensorRenorm to bake into this sensor's cache, or None.
 
     Raises ValueError with actionable text when renormalisation is *required* but
-    unavailable, so a missing registry can never be silently skipped.
+    unavailable OR implausible, so neither a missing registry nor a scene-confounded
+    map can be used silently.
     """
     if mode == "off":
         log.info("renormalisation disabled (--renorm off)")
@@ -67,8 +73,10 @@ def resolve_renorm(sensor: str, mode: str, renorm_dir: Path):
         registry = RenormRegistry.load(renorm_dir)
     except FileNotFoundError:
         message = (
-            f"no renormalisation registry in {renorm_dir}. Fit one first:\n"
-            f"    python scripts/preprocess.py --sensor <reference> --renorm off\n"
+            f"no renormalisation registry in {renorm_dir}. Fit one first:
+"
+            f"    python scripts/preprocess.py --sensor <reference> --renorm off
+"
             f"    python scripts/fit_renorm.py"
         )
         if mode == "require":
@@ -83,11 +91,12 @@ def resolve_renorm(sensor: str, mode: str, renorm_dir: Path):
         )
         return None
 
-    qmap = registry.maps.get(sensor)
-    if qmap is None:
+    renorm = registry.for_sensor(sensor)
+    if renorm is None:
         message = (
             f"registry in {renorm_dir} has no map for {sensor!r} "
-            f"(it has: {sorted(registry.maps) or 'none'}). Fit one with:\n"
+            f"(it has: {registry.sensors or 'none'}). Fit one with:
+"
             f"    python scripts/fit_renorm.py --sensors {sensor}"
         )
         if mode == "require":
@@ -95,12 +104,31 @@ def resolve_renorm(sensor: str, mode: str, renorm_dir: Path):
         log.warning("%s; caching un-renormalised frames", message)
         return None
 
-    summary = qmap.summary()
-    log.info(
-        "applying renorm %s -> %s (median shift %+.2f K, IQR ratio %.3f) before caching",
-        sensor, registry.reference, summary["median_shift_k"], summary["iqr_ratio"],
-    )
-    return qmap
+    for scene, qmap in sorted(renorm.maps.items()):
+        s = qmap.summary()
+        log.info(
+            "  renorm %s [%s]: median %+.2f K, IQR ratio %.3f  (%s)",
+            sensor, scene, s["median_shift_k"], s["iqr_ratio"],
+            qmap.provenance.describe(),
+        )
+
+    bad = renorm.implausible_scenes(max_shift_k=max_shift_k)
+    if bad:
+        detail = "; ".join(f"[{scene}] {'; '.join(rs)}" for scene, rs in bad.items())
+        message = (
+            f"the {sensor!r} renorm map fails the {max_shift_k:g} K plausibility "
+            f"guard: {detail}. A shift this large between two ~10-11 um window "
+            f"channels is a SCENE difference, not a calibration offset -- refit with "
+            f"scripts/fit_renorm.py (see each map's provenance block for what it was "
+            f"fitted on)."
+        )
+        if mode == "require":
+            raise ValueError(f"--renorm require refuses to use it: {message}")
+        log.warning("%s Applying anyway because --renorm auto was requested.", message)
+
+    log.info("applying scene-stratified renorm %s -> %s before caching",
+             sensor, registry.reference)
+    return renorm
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -155,6 +183,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(default: configs/renorm).",
     )
     parser.add_argument(
+        "--max-shift-k", type=float, default=PLAUSIBLE_MEDIAN_SHIFT_K,
+        help=f"Median-shift plausibility limit in Kelvin (default "
+             f"{PLAUSIBLE_MEDIAN_SHIFT_K:g}). --renorm require refuses a map that "
+             f"exceeds it; --renorm auto warns loudly and proceeds.",
+    )
+    parser.add_argument(
         "--no-index", action="store_true",
         help="Skip writing <cache_root>/index.json alongside the cached frames.",
     )
@@ -198,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         cache_root = REPO_ROOT / cache_root
 
     try:
-        renorm = resolve_renorm(args.sensor, args.renorm, args.renorm_dir)
+        renorm = resolve_renorm(
+            args.sensor, args.renorm, args.renorm_dir, max_shift_k=args.max_shift_k
+        )
     except ValueError as exc:
         log.error("%s", exc)
         return 2

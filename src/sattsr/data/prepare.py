@@ -25,7 +25,7 @@ import numpy as np
 
 from sattsr.config import GridConfig
 from sattsr.data.index import FrameRef, cache_path_for
-from sattsr.data.normalize import QuantileMap
+from sattsr.data.normalize import SensorRenorm
 from sattsr.geo.grid import TargetGrid
 from sattsr.geo.resample import coverage_fraction
 from sattsr.io.manifest import ManifestRow
@@ -48,7 +48,7 @@ class PrepareTask:
     #: Cross-sensor radiometric map applied before caching. None for the reference
     #: sensor, or when no registry has been fitted. Frozen dataclass of numpy arrays,
     #: so it pickles cleanly across the process pool.
-    renorm: QuantileMap | None = None
+    renorm: SensorRenorm | None = None
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ def build_tasks(
     grid_config: GridConfig,
     min_coverage: float = 0.5,
     force: bool = False,
-    renorm: QuantileMap | None = None,
+    renorm: SensorRenorm | None = None,
 ) -> list[PrepareTask]:
     """Turn manifest rows into cache-writing tasks."""
     tasks: list[PrepareTask] = []

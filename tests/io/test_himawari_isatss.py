@@ -211,3 +211,45 @@ def test_projection_uses_the_isatss_attribute_spellings(tmp_path):
     assert proj.longitude_of_origin == pytest.approx(140.7)
     np.testing.assert_allclose(proj.x, raw_x * _MICRORAD, rtol=1e-9)
     assert abs(proj.x).max() < 1.0, "radians, not microradians"
+
+
+# ------------------------------------------------- product-family discrimination
+
+
+def test_region3_target_scans_are_not_treated_as_full_disk(tmp_path):
+    """OR_HR3-* is the Region-3 target sector: one tile, ~2.5 min, a small box.
+
+    It satisfies every other part of the ISatSS naming convention and lives in the
+    same slot directories, so without an explicit OR_HFD- anchor it would be mixed
+    into the full-disk series and triplets built across two different footprints.
+    """
+    full_disk = make_isatss_tile(tmp_path, T0, tile=1)
+    region3 = tmp_path / full_disk.name.replace("OR_HFD-", "OR_HR3-")
+    region3.write_bytes(full_disk.read_bytes())
+
+    assert is_isatss(full_disk)
+    assert not is_isatss(region3)
+    assert isatss_key(region3) is None
+
+    frames = HimawariReader().discover(tmp_path)
+    assert [f.name for f in frames] == [full_disk.name]
+
+
+def test_region3_files_do_not_join_a_full_disk_scan_as_siblings(tmp_path):
+    scan = make_isatss_scan(tmp_path, T0, n_tiles=3)
+    intruder = tmp_path / scan[0].name.replace("OR_HFD-", "OR_HR3-").replace(
+        "-T001_", "-T009_"
+    )
+    intruder.write_bytes(scan[0].read_bytes())
+
+    assert len(HimawariReader().sibling_tiles(scan[0])) == 3
+
+
+def test_manifest_ignores_region3_files(tmp_path):
+    make_isatss_scan(tmp_path, T0, n_tiles=4)
+    src = next(tmp_path.glob("OR_HFD-*.nc"))
+    (tmp_path / src.name.replace("OR_HFD-", "OR_HR3-")).write_bytes(src.read_bytes())
+
+    report = scan_raw_files(tmp_path, "himawari8")
+    assert len(report.rows) == 1
+    assert report.unparsed == [], "HR3 is a different product, not a parse failure"

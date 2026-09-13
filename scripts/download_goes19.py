@@ -90,6 +90,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--retries", type=int, default=3, help="Attempts per file (default 3).",
     )
+    parser.add_argument(
+        "--jobs", type=int, default=8,
+        help="Concurrent download threads. The workload is latency-bound, so "
+             "this scales well past the core count. Default 8.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="List keys, download nothing.")
     return parser.parse_args(argv)
 
@@ -121,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 
         stats = download_keys(
             fs, keys, args.out_dir, progress=True,
-            label=f"GOES {day}", attempts=args.retries,
+            label=f"GOES {day}", attempts=args.retries, jobs=args.jobs,
         )
         stats.log_summary(f"GOES-19 {day}")
         total.found += stats.found
