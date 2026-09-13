@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 import torch
+from collections import Counter
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -131,6 +132,28 @@ class CsvLogger:
             row[f"val_{name}"] = value
         with self.path.open("a", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerow([row.get(c, "") for c in self.columns])
+
+
+def log_batch_composition(loader, name: str, n_batches: int = 4) -> None:
+    """Report the sensor mix of the first few batches and of the whole epoch.
+
+    This is the check that the balanced sampler is actually doing something: a
+    uniformly-sampled mixed loader shows batches that are nearly all one sensor.
+    """
+    sampler = getattr(loader, "batch_sampler_ref", None)
+    if sampler is None:
+        log.info("%s loader: uniform sampling (no sensor balancing)", name)
+        return
+
+    log.info("%s loader: %d batch(es)/epoch, balanced across %s",
+             name, len(sampler), ", ".join(sampler.sensors))
+    for i, batch in enumerate(sampler):
+        if i >= n_batches:
+            break
+        counts = Counter(sampler.labels[j] for j in batch)
+        log.info("    batch %d: n=%d  %s", i, len(batch), dict(sorted(counts.items())))
+    total = sampler.composition()
+    log.info("    whole epoch: %s", dict(sorted(total.items())))
 
 
 def log_epoch(epoch: int, epochs: int, lr: float, seconds: float,
@@ -228,6 +251,9 @@ def run(
     scaler = torch.amp.GradScaler(device.type) if use_amp else None
     log.info("mixed precision: %s", "on" if use_amp else "off (fp32)")
 
+    log_batch_composition(train_loader, "train")
+    log_batch_composition(val_loader, "val")
+
     csv_logger = None
     if config.log_csv is not None:
         csv_path = Path(config.log_csv)
@@ -246,6 +272,11 @@ def run(
             dataset = getattr(loader, "dataset", None)
             if hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(epoch)
+            # The balanced sampler shuffles independently of the dataset, so it needs
+            # its own re-roll or every epoch draws the identical batches.
+            sampler = getattr(loader, "batch_sampler_ref", None)
+            if sampler is not None:
+                sampler.set_epoch(epoch)
 
         train_result = train_one_epoch(
             model, train_loader, criterion, optimizer, device,

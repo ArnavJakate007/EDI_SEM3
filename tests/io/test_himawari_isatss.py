@@ -253,3 +253,27 @@ def test_manifest_ignores_region3_files(tmp_path):
     report = scan_raw_files(tmp_path, "himawari8")
     assert len(report.rows) == 1
     assert report.unparsed == [], "HR3 is a different product, not a parse failure"
+
+
+def test_frame_files_includes_superseded_duplicates_that_sibling_tiles_hides(tmp_path):
+    """Reading dedupes per tile; deleting must not, or the old copies leak forever."""
+    scan = make_isatss_scan(tmp_path, T0, n_tiles=3)
+    original = scan[0]
+    # A superseded copy of tile 001: same scan and tile, earlier creation stamp.
+    older = tmp_path / original.name.replace("_c2019", "_c2018")
+    older.write_bytes(original.read_bytes())
+
+    reader = HimawariReader()
+    siblings = reader.sibling_tiles(original)
+    frames = reader.frame_files(original)
+
+    assert len(siblings) == 3, "reading must see one file per tile number"
+    assert len(frames) == 4, "deleting must see every copy on disk"
+    assert older in frames and older not in siblings
+
+
+def test_frame_files_does_not_cross_into_another_scan(tmp_path):
+    make_isatss_scan(tmp_path, T0, n_tiles=3)
+    other = make_isatss_scan(tmp_path, T0 + timedelta(minutes=10), n_tiles=3)
+    reader = HimawariReader()
+    assert len(reader.frame_files(other[0])) == 3

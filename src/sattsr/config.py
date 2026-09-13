@@ -107,6 +107,9 @@ class LoaderConfig(_Base):
     #: held-out rapid-scan frame. 0 checks only exact collisions; a positive value
     #: also rejects near-duplicate scenes minutes apart.
     rapid_scan_guard_minutes: float = 0.0
+    #: Give every sensor an equal share of each TRAINING batch. Validation is never
+    #: balanced -- its job is to report what the real distribution looks like.
+    balance_sensors: bool = True
 
 
 class SplitsConfig(_Base):

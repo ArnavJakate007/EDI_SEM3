@@ -183,6 +183,20 @@ class HimawariReader(BaseReader):
                 continue
         return [p for _, p in sorted(dated, key=lambda kv: (kv[0], str(kv[1])))]
 
+    def frame_files(self, path: Path) -> list[Path]:
+        """EVERY raw file belonging to this scan, duplicates included.
+
+        Distinct from `sibling_tiles`, which deduplicates per tile number so the
+        mosaic does not composite the same footprint twice. That dedup is right for
+        reading and wrong for deleting: the superseded copies are still real files
+        taking real disk, and skipping them leaves them behind forever.
+        """
+        key = isatss_key(path)
+        if key is None:
+            return [Path(path)]
+        parent = Path(path).parent
+        return sorted(p for p in parent.glob("OR_HFD-*.nc") if isatss_key(p) == key)
+
     def sibling_tiles(self, path: Path) -> list[Path]:
         """Every distinct tile of this scan, one file per tile number.
 

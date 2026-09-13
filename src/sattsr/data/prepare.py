@@ -49,6 +49,9 @@ class PrepareTask:
     #: sensor, or when no registry has been fitted. Frozen dataclass of numpy arrays,
     #: so it pickles cleanly across the process pool.
     renorm: SensorRenorm | None = None
+    #: Delete the source file(s) once the cache write is confirmed. Bounds peak disk
+    #: usage when raw and cache would otherwise coexist for the whole backfill.
+    delete_raw: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,9 @@ class PrepareOutcome:
     status: str                     # written | cached | low_coverage | failed
     coverage: float = 0.0
     error: str = ""
+    #: Raw bytes reclaimed by --delete-raw-after-cache, and how many files went.
+    freed_bytes: int = 0
+    freed_files: int = 0
 
 
 @dataclass
@@ -70,6 +76,8 @@ class PrepareStats:
     skipped_cached: int = 0
     skipped_coverage: int = 0
     failed: int = 0
+    freed_bytes: int = 0
+    freed_files: int = 0
     refs: list[FrameRef] = field(default_factory=list)
 
     def log_summary(self, sensor: str, cache_root: Path) -> None:
@@ -84,6 +92,11 @@ class PrepareStats:
             self.skipped_coverage,
             self.failed,
         )
+        if self.freed_files:
+            log.info(
+                "    reclaimed %.2f GB by deleting %d raw file(s) after caching",
+                self.freed_bytes / 1e9, self.freed_files,
+            )
 
 
 def build_tasks(
@@ -94,6 +107,7 @@ def build_tasks(
     min_coverage: float = 0.5,
     force: bool = False,
     renorm: SensorRenorm | None = None,
+    delete_raw: bool = False,
 ) -> list[PrepareTask]:
     """Turn manifest rows into cache-writing tasks."""
     tasks: list[PrepareTask] = []
@@ -109,9 +123,63 @@ def build_tasks(
                 min_coverage=float(min_coverage),
                 force=bool(force),
                 renorm=renorm,
+                delete_raw=bool(delete_raw),
             )
         )
     return tasks
+
+
+def raw_files_for(task: PrepareTask) -> list[Path]:
+    """Every raw file that makes up this frame.
+
+    Usually one file, but a Himawari ISatSS frame is a group of ~88 tiles, and
+    deleting only the canonical tile would leave the other 87 behind -- which is the
+    whole disk problem this is meant to solve.
+    """
+    try:
+        reader = get_reader(task.sensor)
+    except KeyError:
+        return [task.source]
+    # frame_files (all copies) rather than sibling_tiles (deduplicated for reading):
+    # superseded duplicate tiles are still real files occupying real disk.
+    resolve = getattr(reader, "frame_files", None) or getattr(reader, "sibling_tiles", None)
+    if resolve is None:
+        return [task.source]
+    try:
+        found = list(resolve(task.source))
+    except OSError:
+        return [task.source]
+    return found or [task.source]
+
+
+def _delete_raw(task: PrepareTask) -> tuple[int, int]:
+    """Remove the raw file(s) behind `task`, but only if the cache write is real.
+
+    Verified against the cache file on disk rather than against the in-memory status:
+    this is irreversible, so a truncated or missing .npy must never cost us the raw
+    input that could regenerate it.
+    """
+    try:
+        if not task.dest.exists() or task.dest.stat().st_size == 0:
+            log.warning(
+                "not deleting raw for %s: cache file missing or empty", task.source.name
+            )
+            return 0, 0
+    except OSError:
+        return 0, 0
+
+    freed_bytes = 0
+    freed_files = 0
+    for path in raw_files_for(task):
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError as exc:
+            log.warning("could not delete raw %s: %s", path.name, exc)
+            continue
+        freed_bytes += size
+        freed_files += 1
+    return freed_bytes, freed_files
 
 
 def prepare_one(task: PrepareTask) -> PrepareOutcome:
@@ -121,7 +189,13 @@ def prepare_one(task: PrepareTask) -> PrepareOutcome:
     can pickle it on Windows' spawn start method.
     """
     if task.dest.exists() and not task.force:
-        return PrepareOutcome(task, "cached")
+        # Already cached counts as a confirmed write: _delete_raw re-checks the .npy
+        # on disk before unlinking anything. Without this, re-running preprocess over
+        # an existing cache never reclaims its raw, which is exactly the backlog case.
+        freed_bytes, freed_files = _delete_raw(task) if task.delete_raw else (0, 0)
+        return PrepareOutcome(
+            task, "cached", freed_bytes=freed_bytes, freed_files=freed_files
+        )
 
     try:
         reader = get_reader(task.sensor)
@@ -148,13 +222,21 @@ def prepare_one(task: PrepareTask) -> PrepareOutcome:
     except OSError as exc:
         return PrepareOutcome(task, "failed", coverage=coverage, error=str(exc))
 
-    return PrepareOutcome(task, "written", coverage=coverage)
+    freed_bytes, freed_files = (
+        _delete_raw(task) if task.delete_raw else (0, 0)
+    )
+    return PrepareOutcome(
+        task, "written", coverage=coverage,
+        freed_bytes=freed_bytes, freed_files=freed_files,
+    )
 
 
 def _record(stats: PrepareStats, outcome: PrepareOutcome) -> None:
     """Fold one outcome into the running totals, logging anything abnormal."""
     task = outcome.task
     stats.read += 1
+    stats.freed_bytes += outcome.freed_bytes
+    stats.freed_files += outcome.freed_files
     if outcome.status == "written":
         stats.written += 1
         stats.refs.append(FrameRef(task.timestamp, task.dest, task.sensor))

@@ -217,3 +217,98 @@ def test_renorm_survives_the_process_pool(tmp_path, raw_rows):
     )
     assert stats.written == 3
     assert stats.failed == 0
+
+
+# ------------------------------------------------ delete-raw-after-cache
+
+
+def test_raw_is_deleted_only_after_a_confirmed_cache_write(tmp_path, raw_rows):
+    cache = tmp_path / "cache" / "goes19"
+    sources = [r.path for r in raw_rows]
+    assert all(p.exists() for p in sources)
+
+    stats = run_prepare(build_tasks(
+        raw_rows, cache_root=cache, grid_config=GRID, delete_raw=True
+    ))
+
+    assert stats.written == 3
+    assert not any(p.exists() for p in sources), "raw should be gone once cached"
+    assert stats.freed_files == 3
+    assert stats.freed_bytes > 0
+    assert len(list(cache.rglob("*.npy"))) == 3, "cache must survive"
+
+
+def test_raw_is_kept_when_preprocessing_fails(tmp_path, raw_rows):
+    """A file that could not be read must stay on disk so it can be retried."""
+    cache = tmp_path / "cache" / "goes19"
+    tasks = build_tasks(raw_rows, cache_root=cache, grid_config=GRID, delete_raw=True)
+    tasks[1].source.write_text("not netcdf at all", encoding="utf-8")
+
+    stats = run_prepare(tasks)
+
+    assert stats.failed == 1
+    assert tasks[1].source.exists(), "a failed frame must keep its raw file"
+    assert not tasks[0].source.exists() and not tasks[2].source.exists()
+    assert stats.freed_files == 2
+
+
+def test_raw_is_kept_when_the_coverage_gate_rejects_the_frame(tmp_path, raw_rows):
+    cache = tmp_path / "cache" / "goes19"
+    tasks = build_tasks(raw_rows, cache_root=cache, grid_config=OFF_DISK,
+                        min_coverage=0.5, delete_raw=True)
+    stats = run_prepare(tasks)
+
+    assert stats.skipped_coverage == 3
+    assert all(t.source.exists() for t in tasks), "coverage rejects are retryable"
+    assert stats.freed_files == 0
+
+
+def test_nothing_is_deleted_without_the_flag(tmp_path, raw_rows):
+    cache = tmp_path / "cache" / "goes19"
+    stats = run_prepare(build_tasks(raw_rows, cache_root=cache, grid_config=GRID))
+    assert all(r.path.exists() for r in raw_rows)
+    assert stats.freed_files == 0
+
+
+def test_deletion_is_skipped_if_the_cache_file_vanished(tmp_path, raw_rows):
+    """Guards the irreversible step against a cache write that did not stick."""
+    from sattsr.data.prepare import _delete_raw
+
+    cache = tmp_path / "cache" / "goes19"
+    task = build_tasks(raw_rows[:1], cache_root=cache, grid_config=GRID,
+                       delete_raw=True)[0]
+    freed_bytes, freed_files = _delete_raw(task)     # dest never written
+    assert (freed_bytes, freed_files) == (0, 0)
+    assert task.source.exists()
+
+
+def test_a_himawari_frame_deletes_its_whole_tile_group(tmp_path):
+    """One ISatSS frame is ~88 files; deleting only the canonical tile leaks 87."""
+    from datetime import datetime, timezone
+
+    from sattsr.data.prepare import raw_files_for
+    from tests.conftest import make_isatss_scan
+
+    ts = datetime(2019, 7, 1, 2, 0, tzinfo=timezone.utc)
+    scan = make_isatss_scan(tmp_path / "raw", ts, n_tiles=4)
+    task = build_tasks(
+        scan_raw_files(tmp_path / "raw", "himawari8").rows,
+        cache_root=tmp_path / "cache", grid_config=GRID, delete_raw=True,
+    )[0]
+    assert len(raw_files_for(task)) == 4, "must resolve the whole tile group"
+    assert len(scan) == 4
+
+
+def test_rerunning_reclaims_raw_for_already_cached_frames(tmp_path, raw_rows):
+    """The backlog case: cache already exists, raw still on disk from an older run."""
+    cache = tmp_path / "cache" / "goes19"
+    run_prepare(build_tasks(raw_rows, cache_root=cache, grid_config=GRID))
+    assert all(r.path.exists() for r in raw_rows), "first pass keeps raw"
+
+    again = run_prepare(build_tasks(
+        raw_rows, cache_root=cache, grid_config=GRID, delete_raw=True
+    ))
+    assert again.skipped_cached == 3
+    assert again.freed_files == 3
+    assert not any(r.path.exists() for r in raw_rows)
+    assert len(list(cache.rglob("*.npy"))) == 3

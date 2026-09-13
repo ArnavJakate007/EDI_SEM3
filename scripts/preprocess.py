@@ -180,6 +180,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(default: configs/renorm).",
     )
     parser.add_argument(
+        "--delete-raw-after-cache", action="store_true",
+        help="Delete each raw file once its regridded frame is confirmed written to "
+             "the cache. Bounds PEAK disk usage: raw and cache never coexist for more "
+             "than one batch. A frame that fails to read, fails the coverage gate, or "
+             "whose .npy is missing/empty keeps its raw file so it can be retried. "
+             "For Himawari the whole ~88-tile group for that scan is removed together.",
+    )
+    parser.add_argument(
         "--max-shift-k", type=float, default=PLAUSIBLE_MEDIAN_SHIFT_K,
         help=f"Median-shift plausibility limit in Kelvin (default "
              f"{PLAUSIBLE_MEDIAN_SHIFT_K:g}). --renorm require refuses a map that "
@@ -246,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         min_coverage=args.min_coverage,
         force=args.force,
         renorm=renorm,
+        delete_raw=args.delete_raw_after_cache,
     )
     stats = run_prepare(tasks, workers=args.workers, progress=True)
     stats.log_summary(args.sensor, cache_root)

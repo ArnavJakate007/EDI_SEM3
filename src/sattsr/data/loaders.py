@@ -47,6 +47,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, default_collate
 from sattsr.config import LoaderConfig, NormalizationConfig, PretrainConfig, load_config
 from sattsr.data.dataset import TripletDataset
 from sattsr.data.index import load_or_scan_index
+from sattsr.data.sampler import BalancedSensorBatchSampler, sensor_labels
 from sattsr.data.triplets import Triplet, build_triplets
 
 log = logging.getLogger(__name__)
@@ -290,15 +291,34 @@ def _make_dataset(
     return TaggedTripletDataset(inner, sensor=source.sensor, scan_mode=source.scan_mode)
 
 
-def _loader(dataset: Dataset, loader_cfg: LoaderConfig, *, shuffle: bool) -> DataLoader:
+def _loader(
+    dataset: Dataset, loader_cfg: LoaderConfig, *, shuffle: bool, balance: bool = False
+) -> DataLoader:
+    """Build a DataLoader, optionally with the sensor-balanced batch sampler.
+
+    Balancing applies to training only. A balanced validation loader would report a
+    metric for a distribution that does not exist, and would oversample the minority
+    sensor's few triplets into the score.
+    """
+    common = {
+        "num_workers": loader_cfg.num_workers,
+        "collate_fn": mixed_sensor_collate,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if balance:
+        labels = sensor_labels(dataset)
+        if len(set(labels)) > 1:
+            sampler = BalancedSensorBatchSampler(
+                labels, loader_cfg.batch_size, seed=loader_cfg.seed
+            )
+            loader = DataLoader(dataset, batch_sampler=sampler, **common)
+            loader.batch_sampler_ref = sampler      # type: ignore[attr-defined]
+            return loader
+        log.info("only one sensor present; balanced sampling would be a no-op")
+
     return DataLoader(
-        dataset,
-        batch_size=loader_cfg.batch_size,
-        shuffle=shuffle,
-        num_workers=loader_cfg.num_workers,
-        collate_fn=mixed_sensor_collate,
-        drop_last=False,
-        pin_memory=torch.cuda.is_available(),
+        dataset, batch_size=loader_cfg.batch_size, shuffle=shuffle,
+        drop_last=False, **common,
     )
 
 
@@ -355,7 +375,7 @@ def build_dataloaders(
     loaders: dict[str, DataLoader] = {}
 
     def add(name: str, parts: list[tuple[list[Triplet], SplitSource]], *, augment: bool,
-            shuffle: bool) -> None:
+            shuffle: bool, balance: bool = False) -> None:
         datasets = [_make_dataset(t, s, loader_cfg, augment=augment) for t, s in parts]
         if not datasets:
             log.warning("split %r is empty; no loader built for it", name)
@@ -363,13 +383,15 @@ def build_dataloaders(
         combined: Dataset = (
             datasets[0] if len(datasets) == 1 else EpochAwareConcatDataset(datasets)
         )
-        loader = _loader(combined, loader_cfg, shuffle=shuffle)
+        loader = _loader(combined, loader_cfg, shuffle=shuffle, balance=balance)
         loader.renorm_registry = renorm_registry        # type: ignore[attr-defined]
         loaders[name] = loader
 
-    add("train", pretrain_train, augment=True, shuffle=True)
+    add("train", pretrain_train, augment=True, shuffle=True,
+        balance=loader_cfg.balance_sensors)
     add("val", pretrain_val, augment=False, shuffle=False)
-    add("finetune", finetune, augment=True, shuffle=True)
+    add("finetune", finetune, augment=True, shuffle=True,
+        balance=loader_cfg.balance_sensors)
     add("insat_rapid_scan_eval", rapid, augment=False, shuffle=False)
 
     log.info(
